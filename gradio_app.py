@@ -87,16 +87,16 @@ def create_demo() -> Any:
 
     css = """
     :root {
-        --factlens-ink: #172033;
-        --factlens-muted: #68738a;
-        --factlens-blue: #315efb;
+        --factlens-ink: #173332;
+        --factlens-muted: #647a77;
+        --factlens-blue: #0f766e;
         --factlens-surface: #ffffff;
-        --factlens-border: #e8ebf2;
+        --factlens-border: #dce8e5;
     }
     .gradio-container {
         max-width: 1160px !important;
         margin: 0 auto !important;
-        background: #f7f8fc;
+        background: #f3f8f6;
         color: var(--factlens-ink) !important;
     }
     .gradio-container, .gradio-container * { color-scheme: light; }
@@ -119,44 +119,44 @@ def create_demo() -> Any:
     .gradio-container input {
         color: var(--factlens-ink) !important;
         background: #ffffff !important;
-        border-color: #cbd3e1 !important;
+        border-color: #b9cfca !important;
     }
     .gradio-container textarea::placeholder,
     .gradio-container input::placeholder {
-        color: #78849a !important;
+        color: #718783 !important;
         opacity: 1;
     }
     .gradio-container .gr-button {
         min-height: 44px;
-        border: 1px solid #c5cede !important;
-        color: #172033 !important;
-        background: #eef1f7 !important;
+        border: 1px solid #c3d8d2 !important;
+        color: #173332 !important;
+        background: #eaf3f0 !important;
         font-weight: 700;
     }
     .gradio-container .gr-button:hover {
-        background: #e2e7f1 !important;
-        border-color: #aebbd0 !important;
+        background: #dcece7 !important;
+        border-color: #9bbdb4 !important;
     }
     .gradio-container .gr-button.primary {
         color: #ffffff !important;
-        background: #315efb !important;
-        border-color: #315efb !important;
+        background: #0f766e !important;
+        border-color: #0f766e !important;
     }
     .gradio-container .gr-button.primary:hover {
-        background: #244bd6 !important;
-        border-color: #244bd6 !important;
+        background: #0b5f59 !important;
+        border-color: #0b5f59 !important;
     }
     .gradio-container .secondary {
-        color: #172033 !important;
+        color: #173332 !important;
     }
     .gradio-container .examples,
     .gradio-container .examples-table {
         color: var(--factlens-ink) !important;
     }
     .gradio-container .examples-table button {
-        color: #3152bf !important;
-        background: #f2f5ff !important;
-        border-color: #d3dcff !important;
+        color: #0f766e !important;
+        background: #edf7f3 !important;
+        border-color: #c8e2d9 !important;
     }
     .gradio-container .accordion,
     .gradio-container details,
@@ -166,16 +166,16 @@ def create_demo() -> Any:
         border-color: var(--factlens-border) !important;
     }
     .gradio-container .icon-button {
-        color: #45516a !important;
+        color: #526d68 !important;
     }
     .app-shell { gap: 22px; }
     .gradio-container .hero {
         padding: 38px 42px 34px;
         border-radius: 24px;
         color: #ffffff !important;
-        background: linear-gradient(120deg, #172033 0%, #243b72 56%, #315efb 100%) !important;
+        background: linear-gradient(120deg, #123331 0%, #155e59 56%, #0f766e 100%) !important;
         border: 0 !important;
-        box-shadow: 0 16px 38px rgba(32, 54, 105, 0.18);
+        box-shadow: 0 16px 38px rgba(15, 91, 82, 0.18);
     }
     .gradio-container .hero .prose,
     .gradio-container .hero h1,
@@ -183,9 +183,9 @@ def create_demo() -> Any:
         color: #ffffff !important;
     }
     .gradio-container .hero h1 { margin: 0 0 10px; font-size: 40px; letter-spacing: -1px; }
-    .gradio-container .hero p { margin: 0; color: #dbe5ff !important; font-size: 16px; max-width: 680px; }
+    .gradio-container .hero p { margin: 0; color: #d8f0e9 !important; font-size: 16px; max-width: 680px; }
     .gradio-container .hero .eyebrow {
-        color: #9fb6ff;
+        color: #9fe0cf;
         font-size: 12px;
         font-weight: 700;
         letter-spacing: 1.8px;
@@ -197,7 +197,7 @@ def create_demo() -> Any:
         border: 1px solid var(--factlens-border);
         border-radius: 18px;
         padding: 22px;
-        box-shadow: 0 8px 24px rgba(23, 32, 51, 0.05);
+        box-shadow: 0 8px 24px rgba(23, 51, 50, 0.06);
     }
     .gradio-container .input-card textarea { font-size: 16px !important; }
     .section-label {
@@ -207,7 +207,23 @@ def create_demo() -> Any:
         margin-bottom: 4px;
     }
     .section-help { color: var(--factlens-muted); font-size: 13px; }
-    .status { color: var(--factlens-muted); min-height: 24px; }
+    .status {
+        color: var(--factlens-muted) !important;
+        min-height: 24px;
+        opacity: 1 !important;
+    }
+    .gradio-container .status,
+    .gradio-container .status .prose,
+    .gradio-container .status p,
+    .gradio-container .status span {
+        color: var(--factlens-muted) !important;
+        opacity: 1 !important;
+    }
+    .gradio-container .result-card strong,
+    .gradio-container .result-card b {
+        color: var(--factlens-ink) !important;
+        opacity: 1 !important;
+    }
     .gradio-container .result-card h3 { margin-top: 0; color: var(--factlens-ink); }
     .gradio-container h2,
     .gradio-container h3,
@@ -218,7 +234,7 @@ def create_demo() -> Any:
         color: var(--factlens-ink) !important;
     }
     .gradio-container .result-card p,
-    .gradio-container .result-card li { color: #45516a; line-height: 1.65; }
+    .gradio-container .result-card li { color: #526d68; line-height: 1.65; }
     .gradio-container .evidence-card { padding-top: 8px; }
     .gradio-container .evidence-card h3 { color: var(--factlens-ink); }
     .gradio-container .footer { color: var(--factlens-muted); text-align: center; font-size: 12px; }
@@ -235,8 +251,8 @@ def create_demo() -> Any:
     with gr.Blocks(
         title="FACTLENS · Claim verification",
         theme=gr.themes.Soft(
-            primary_hue="blue",
-            secondary_hue="slate",
+            primary_hue="teal",
+            secondary_hue="green",
             neutral_hue="slate",
             font=gr.themes.GoogleFont("DM Sans"),
         ),
@@ -261,7 +277,7 @@ def create_demo() -> Any:
                 )
                 claim = gr.Textbox(
                     show_label=False,
-                    placeholder="e.g. The James Webb Space Telescope launched in 2021.",
+                    placeholder="e.g. Rahul Gandhi has been chief justice of india in the past.",
                     lines=3,
                     max_lines=6,
                     autofocus=True,
@@ -271,9 +287,9 @@ def create_demo() -> Any:
                     clear = gr.Button("Clear", variant="secondary", scale=1)
                 gr.Examples(
                     examples=[
-                        ["Python is an interpreted programming language."],
-                        ["The James Webb Space Telescope launched in 2021."],
-                        ["Water boils at 100 degrees Celsius at sea level."],
+                        ["Rahul Gandhi has been chief justice of india in the past."],
+                        ["Rahul Gandhi is the leader of opposition."],
+                        ["Jensen Huang cheated on his wife."],
                     ],
                     inputs=claim,
                     label="Try an example",
