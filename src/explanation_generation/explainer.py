@@ -1,11 +1,17 @@
+import re
+from typing import Literal
+
 import torch
 from pydantic import BaseModel, Field
-from typing import Literal
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+
 
 class Evidence(BaseModel):
     text: str
-    # label: Literal["supporting", "opposing"]
+
 
 class VerdictInput(BaseModel):
     claim: str
@@ -13,96 +19,112 @@ class VerdictInput(BaseModel):
     evidences: list[Evidence] = Field(min_length=1)
 
 
+_VERDICT_GUIDANCE = {
+    "Supported": (
+        "State the specific fact in the evidence that confirms the claim."
+    ),
+    "Refuted": (
+        "State the specific fact in the evidence that contradicts the claim "
+        "(for example a different person, place, date or number than the claim states)."
+    ),
+    "Not Enough Information": (
+        "Say what the evidence does cover and what it does not establish about the claim."
+    ),
+}
+
+SYSTEM_PROMPT = (
+    "You explain fact-checking verdicts. The verdict is already decided; do not "
+    "change or question it. Use only facts written in the evidence. Never state "
+    "anything as true that the evidence does not say. Write plain text, no "
+    "markdown, no lists, no headings."
+)
+
+
 class VerdictExplainer:
+    """
+    Generate a short natural-language explanation for a verdict.
 
-    def __init__(self):
-        self.model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+    model_name: Hugging Face chat model. If it is the same model the query
+    generator uses (src/query_generation/slm_client.py), that already-loaded
+    model is reused instead of loading a second copy.
+    """
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+    def __init__(self, model_name: str | None = None):
+        self.model_name = model_name or DEFAULT_MODEL_NAME
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.model_name,
-            torch_dtype=torch.float16,
-            device_map="auto"
-        )
+        shared = self._shared_query_model(self.model_name)
+        if shared is not None:
+            self.tokenizer, self.model = shared
+        else:
+            self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                dtype=torch.float16,
+                device_map="auto",
+            )
 
         self.model.eval()
 
-    def prepare_input(self, claim, verdict, evidences):
-        evidence_objects = [Evidence(text=evidence) for evidence in evidences]
+    @staticmethod
+    def _shared_query_model(model_name):
+        try:
+            from src.query_generation import slm_client
+        except ImportError:
+            return None
+        if model_name != slm_client.MODEL_NAME:
+            return None
+        return slm_client.load_slm()
 
-        data = VerdictInput(
+    def prepare_input(self, claim, verdict, evidences):
+        return VerdictInput(
             claim=claim,
             verdict=verdict,
-            evidences=evidence_objects
+            evidences=[Evidence(text=evidence) for evidence in evidences],
         )
 
-        return data
-
     def create_prompt(self, data: VerdictInput):
-        evidence_text = ""
+        evidence_text = "\n".join(
+            f"Evidence {i}: {evidence.text}"
+            for i, evidence in enumerate(data.evidences, 1)
+        )
+        return (
+            f"Claim: {data.claim}\n"
+            f"Verdict: {data.verdict}\n\n"
+            f"{evidence_text}\n\n"
+            f"Explain in at most 2 sentences why the claim is "
+            f"{data.verdict.lower()}. {_VERDICT_GUIDANCE[data.verdict]} "
+            f"Refer to the evidence number you use, e.g. (Evidence 1)."
+        )
 
-        # evidence_text = "\n".join(f"Evidence {i} ({evidence.label}): {evidence.text}" for i, evidence in enumerate(data.evidences, 1))
-        evidence_text = "\n".join(f"Evidence {i}: {evidence.text}" for i, evidence in enumerate(data.evidences, 1))
-
-        prompt = f"""
-            Fact-checking task:
-
-            Claim: {data.claim}
-
-            Verdict: {data.verdict}
-
-            Evidence:
-            {evidence_text}
-
-            Explain the verdict in 2 sentences.
-
-            'For SUPPORTED': Explain what evidence establishes the claim.
-
-            'For REFUTED': Explain what evidence contradicts the claim.
-
-            'For NOT ENOUGH INFORMATION': Explain why the evidence does not establish
-            whether the claim is true or false. Identify what cannot be concluded
-            from the available evidence.
-
-            Do not invent facts. Do not repeat the instructions.
-            Write only the explanation.
-
-            Explanation:
-            """
-        
-        return prompt
+    @staticmethod
+    def _clean(text):
+        text = re.sub(r"[*#`]+", "", text)            # strip markdown
+        text = re.sub(r"\s+", " ", text).strip()
+        # Keep at most two complete sentences.
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        kept = " ".join(sentences[:2]).strip()
+        if kept and kept[-1] not in ".!?":
+            kept += "."
+        return kept
 
     def explain(self, claim, verdict, evidences):
         """
-        Generate a concise explanation for the given claim, verdict, and evidence.
+        Generate a concise explanation for the given claim, verdict and evidence.
 
         Args:
             claim (str): The claim to be explained.
-            verdict (str): One of ["Supported", "Refuted", "Not Enough Information"]. The verdict associated with the claim.
-            evidences (list[str]): A list of evidence texts supporting or refuting the claim.
+            verdict (str): "Supported", "Refuted" or "Not Enough Information".
+            evidences (list[str]): Evidence texts; pass the passages that
+                decided the verdict first.
 
         Returns:
-            str: A concise explanation of the verdict based on the provided evidence.
+            str: At most two sentences of plain text.
         """
-        # convert input to structured data
         data = self.prepare_input(claim, verdict, evidences)
 
-        # generate prompt
-        prompt = self.create_prompt(data)
-
-        print(next(self.model.parameters()).dtype)
-        print(f"Model memory: {self.model.get_memory_footprint() / 1024**2:.2f} MB")
-
         messages = [
-            {
-                "role": "system",
-                "content": "You are an assistant that explains fact-checking results. Use only the provided evidence."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": self.create_prompt(data)},
         ]
 
         inputs = self.tokenizer.apply_chat_template(
@@ -110,58 +132,20 @@ class VerdictExplainer:
             tokenize=True,
             add_generation_prompt=True,
             return_tensors="pt",
-            return_dict=True
+            return_dict=True,
         ).to(self.model.device)
-
-        self.model.generation_config.temperature = None
-        self.model.generation_config.top_p = None
-        self.model.generation_config.top_k = None
 
         with torch.inference_mode():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=120,
-                do_sample=False
+                max_new_tokens=110,
+                do_sample=False,
+                temperature=None,
+                top_p=None,
+                top_k=None,
+                pad_token_id=self.tokenizer.eos_token_id,
             )
 
         generated_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
-
-        explanation = self.tokenizer.decode(
-            generated_tokens,
-            skip_special_tokens=True
-        )
-
-        # # tokenize input
-        # inputs = self.tokenizer(
-        #     prompt,
-        #     return_tensors="pt",
-        #     truncation=True,
-        #     max_length=512
-        # )
-
-        # # generate explanation
-        # inputs = {
-        #     key: value.to(self.model.device)
-        #     for key, value in inputs.items()
-        # }
-        # with torch.inference_mode():
-        #     outputs = self.model.generate(
-        #         **inputs,
-        #         max_new_tokens=200,
-        #         # min_new_tokens=20,
-        #         num_beams=4,
-        #         repetition_penalty=1.2,
-        #         no_repeat_ngram_size=3,
-        #         early_stopping=True
-        #     )
-        
-        # print(next(self.model.parameters()).dtype)
-        # print(f"Model memory: {self.model.get_memory_footprint() / 1024**2:.2f} MB")
-
-        # # decode output
-        # explanation = self.tokenizer.decode(
-        #     outputs[0],
-        #     skip_special_tokens=True
-        # )
-
-        return explanation.strip()
+        explanation = self.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+        return self._clean(explanation)

@@ -56,6 +56,43 @@ def parse_queries(response):
     return lines
 
 
+def parse_entities(response, claim):
+    """
+    Extract the "entities" list from the model response, keeping only
+    entities whose words all appear in the claim (case-insensitive), so
+    the model can fix capitalisation but cannot invent names.
+    """
+    if isinstance(response, dict):
+        response = response.get("text", "")
+    if not isinstance(response, str):
+        return []
+
+    start, end = response.find("{"), response.rfind("}")
+    if start == -1 or end <= start:
+        return []
+    try:
+        data = json.loads(response[start:end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return []
+
+    entities = data.get("entities") if isinstance(data, dict) else None
+    if not isinstance(entities, list):
+        return []
+
+    claim_tokens = _tokens(claim or "")
+    kept = []
+    for entity in entities:
+        if not isinstance(entity, str):
+            continue
+        entity = _clean(entity)
+        entity_tokens = _tokens(entity)
+        if not entity_tokens or not entity_tokens <= claim_tokens:
+            continue
+        if entity.lower() not in {e.lower() for e in kept}:
+            kept.append(entity)
+    return kept
+
+
 def _tokens(text):
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
@@ -83,22 +120,36 @@ def filter_queries(candidates, claim, analysis=None, max_queries=5):
     return kept
 
 
-def generate_subqueries(claim, max_queries=5, analysis=None, max_new_tokens=192):
+def generate_queries_and_entities(claim, max_queries=5, max_new_tokens=224):
     """
-    Generate up to `max_queries` grounded search queries for `claim`.
+    Ask the SLM for the claim's entities and up to `max_queries` queries.
 
+    Returns {"queries": [...], "entities": [...]}.
     Raises on model-loading/generation errors so the caller can fall back.
     """
-    if not isinstance(claim, str) or not claim.strip():
-        return []
-    if max_queries < 1:
-        return []
+    if not isinstance(claim, str) or not claim.strip() or max_queries < 1:
+        return {"queries": [], "entities": []}
 
     messages = build_query_messages(claim, max_queries)
     result = slm_client.generate_chat(messages, max_new_tokens=max_new_tokens)
-    candidates = parse_queries(result)
 
-    return filter_queries(candidates, claim, analysis, max_queries)
+    entities = parse_entities(result, claim)
+    analysis = {"entities": entities}
+    queries = filter_queries(parse_queries(result), claim, analysis, max_queries)
+    return {"queries": queries, "entities": entities}
 
 
-__all__ = ["parse_queries", "filter_queries", "generate_subqueries"]
+def generate_subqueries(claim, max_queries=5, analysis=None, max_new_tokens=224):
+    """Backwards-compatible wrapper returning only the queries."""
+    return generate_queries_and_entities(
+        claim, max_queries=max_queries, max_new_tokens=max_new_tokens
+    )["queries"]
+
+
+__all__ = [
+    "parse_queries",
+    "parse_entities",
+    "filter_queries",
+    "generate_queries_and_entities",
+    "generate_subqueries",
+]

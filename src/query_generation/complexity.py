@@ -97,7 +97,7 @@ def estimate_claim_complexity(claim, analysis=None):
 
 def get_max_queries(complexity):
     limits = {
-        "simple": 1,
+        "simple": 2,
         "moderate": 3,
         "complex": 5,
     }

@@ -170,40 +170,54 @@ def _keyword_fallback_queries(claim, limit=5):
 # Model-based generation
 # ---------------------------------------------------------------------------
 
+MAX_ENTITY_QUERIES = 2
+
+
+def _llm_search_plan(claim, max_queries):
+    """Model entities + queries; empty result on any failure."""
+    try:
+        from src.query_generation.subquery_generator import generate_queries_and_entities
+
+        return generate_queries_and_entities(claim, max_queries=max_queries)
+    except Exception as error:
+        print(f"[QUERY GENERATION] SLM generation failed: {error}")
+        return {"queries": [], "entities": []}
+
+
 def generate_queries_with_llm(claim, max_queries=5):
     """Generate queries with the SLM only. Returns [] on any failure."""
     if not isinstance(claim, str) or not claim.strip():
         return []
-    try:
-        from src.query_generation.subquery_generator import generate_subqueries
-
-        return generate_subqueries(_normalize_query(claim), max_queries=max_queries)
-    except Exception as error:
-        print(f"[QUERY GENERATION] SLM generation failed: {error}")
-        return []
+    return _llm_search_plan(_normalize_query(claim), max_queries)["queries"]
 
 
 # Backwards-compatible alias (the SmolLM2 client was replaced).
 generate_queries_with_smol = generate_queries_with_llm
 
 
-def generate_queries(claim, claim_made_at=None):
+def generate_search_plan(claim, claim_made_at=None):
     """
-    Generate search queries for a claim.
+    Build everything retrieval and ranking need for a claim.
 
-    Returns a list of 1-5 distinct query strings.
-    `claim_made_at` is accepted for API compatibility; date filtering
-    happens in evidence retrieval.
+    Returns:
+        {"queries": [...], "entities": [...]}
+        - queries: model queries (neutral + claim-specific), topped up with
+          keyword fallbacks, plus one plain query per main entity
+          (e.g. "Rahul Gandhi"), which reliably surfaces the entity's own
+          Wikipedia page.
+        - entities: named entities with correct capitalisation.
     """
     if not isinstance(claim, str) or not claim.strip():
-        return []
+        return {"queries": [], "entities": []}
 
     claim = _normalize_query(claim)
     complexity = estimate_claim_complexity(claim)
     max_queries = get_max_queries(complexity)
     target = min(MIN_QUERIES, max_queries)
 
-    queries = generate_queries_with_llm(claim, max_queries=max_queries)
+    plan = _llm_search_plan(claim, max_queries)
+    queries = list(plan["queries"])
+    entities = plan["entities"] or _extract_named_entities(claim)
 
     if len(queries) < target:
         if queries:
@@ -213,7 +227,57 @@ def generate_queries(claim, claim_made_at=None):
         queries = queries + _keyword_fallback_queries(claim)
 
     queries = _filter_and_prune_queries(queries, limit=max_queries)
-    return queries or [claim]
+
+    # Entity-only queries: the subject's own page is usually the best evidence,
+    # and it is what reveals that a claim mixes up people (Rahul vs Rajiv).
+    lowered = {q.lower() for q in queries}
+    for entity in entities[:MAX_ENTITY_QUERIES]:
+        if len(re.findall(r"[A-Za-z0-9]+", entity)) < 2 and len(entities) > 1:
+            continue  # skip one-word entities like "India" when a person/org exists
+        if entity.lower() not in lowered:
+            queries.append(entity)
+            lowered.add(entity.lower())
+
+    return {"queries": queries or [claim], "entities": entities}
+
+
+def generate_queries(claim, claim_made_at=None):
+    """
+    Generate search queries for a claim.
+
+    Returns a list of distinct query strings.
+    `claim_made_at` is accepted for API compatibility; date filtering
+    happens in evidence retrieval.
+    """
+    if not isinstance(claim, str) or not claim.strip():
+        return []
+    return generate_search_plan(claim, claim_made_at=claim_made_at)["queries"]
+
+
+def normalize_claim(claim, entities=None):
+    """
+    Put a claim in the shape the FEVER verifier was trained on:
+    entity capitalisation restored ("rahul gandhi" -> "Rahul Gandhi"),
+    first letter capitalised and a terminal period.
+
+    The verifier is case-sensitive: "rahul gandhi is prime minister of india"
+    gave an unsure 0.52 SUPPORTS, while "Rahul Gandhi is prime minister of
+    India." is a confident REFUTES against the same evidence.
+    """
+    text = _normalize_query(claim)
+    if not text:
+        return ""
+
+    for entity in sorted(entities or [], key=len, reverse=True):
+        if not isinstance(entity, str) or not entity.strip():
+            continue
+        pattern = r"(?<![A-Za-z0-9])" + re.escape(entity) + r"(?![A-Za-z0-9])"
+        text = re.sub(pattern, entity, text, flags=re.IGNORECASE)
+
+    text = text[0].upper() + text[1:]
+    if text[-1] not in ".!?":
+        text += "."
+    return text
 
 
 def generate_queries_with_metadata(claim, claim_made_at=None):

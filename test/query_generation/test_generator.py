@@ -11,13 +11,13 @@ from src.query_generation.validator import (
 )
 
 
-def test_simple_claim_has_one_query_limit():
+def test_simple_claim_has_two_query_limit():
     claim = "The Earth revolves around the Sun."
 
     complexity = estimate_claim_complexity(claim)
 
     assert complexity == "simple"
-    assert get_max_queries(complexity) == 1
+    assert get_max_queries(complexity) == 2
 
 
 def test_complex_claim_has_five_query_limit():

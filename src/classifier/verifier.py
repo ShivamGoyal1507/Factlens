@@ -17,6 +17,7 @@ from .config import (
     MODEL_NAME,
     NUM_LABELS,
     TRAINED_MODEL_DIR,
+    TRAINING_SEED,
 )
 
 
@@ -51,7 +52,27 @@ class ClaimVerifier:
                 str(tokenizer_source),
                 local_files_only=True,
             )
-            base_model = auto_model.from_pretrained(str(base_model_source))
+            # DeBERTa's `pooler.dense` is not in the base checkpoint, so it is
+            # randomly initialised. During training it was created right after
+            # set_seed(TRAINING_SEED), kept frozen by LoRA and NOT saved in the
+            # adapter (modules_to_save=["classifier"]). Re-seeding here
+            # recreates the identical pooler weights; without it the trained
+            # head sees features from a different random layer and accuracy
+            # drops from ~97% to ~41% on the validation set.
+            # Permanent fix: retrain with modules_to_save=["classifier", "pooler"].
+            from transformers import set_seed
+
+            set_seed(TRAINING_SEED)
+
+            # The adapter was trained with a 3-way head (SUPPORTS/REFUTES/NEI);
+            # without num_labels transformers builds a 2-way head and the
+            # adapter fails to load with a size mismatch.
+            base_model = auto_model.from_pretrained(
+                str(base_model_source),
+                num_labels=NUM_LABELS,
+                id2label=ID2LABEL,
+                label2id={label: idx for idx, label in ID2LABEL.items()},
+            )
             self.model = peft_model.from_pretrained(
                 base_model,
                 str(self.model_dir),
@@ -66,6 +87,11 @@ class ClaimVerifier:
             ) from error
 
         self._validate_model_output()
+
+    @property
+    def torch(self) -> Any:
+        """The lazily imported torch module (stored as ``_torch``)."""
+        return self._torch
 
     @staticmethod
     def _import_inference_dependencies() -> tuple[Any, Any, Any, Any]:
@@ -238,6 +264,49 @@ class ClaimVerifier:
     def verify(self, claim: str, evidence: Any) -> dict[str, Any]:
         """Return the model verdict and softmax probabilities for one claim."""
         return self._predict([(claim, evidence)])[0]
+
+    def verify_evidence(
+        self,
+        claim: str,
+        evidence: Sequence[Any],
+        weights: Sequence[float] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Verify the claim against each evidence passage separately (the way
+        the FEVER model was trained) and aggregate into one verdict.
+
+        Concatenating all passages truncates at MAX_LENGTH tokens and hides
+        the decisive passage; per-passage scoring avoids that.
+
+        Returns the same keys as verify() plus "per_evidence" (one result per
+        passage) and "decisive_evidence" (indices of passages that drove the
+        verdict).
+        """
+        from .aggregation import aggregate_predictions
+
+        if isinstance(evidence, (str, bytes)) or not isinstance(evidence, Sequence):
+            raise TypeError("evidence must be a non-empty list or tuple")
+        if not evidence:
+            raise ValueError("evidence must contain at least one item")
+
+        per_evidence = self._predict([(claim, [item]) for item in evidence])
+        aggregated = aggregate_predictions(per_evidence, weights=weights)
+
+        return {
+            "claim": claim,
+            "verdict": aggregated["verdict"],
+            "confidence": float(aggregated["confidence"]),
+            "probabilities": aggregated["probabilities"],
+            "decisive_evidence": aggregated["decisive_evidence"],
+            "per_evidence": [
+                {
+                    "verdict": item["verdict"],
+                    "confidence": item["confidence"],
+                    "probabilities": item["probabilities"],
+                }
+                for item in per_evidence
+            ],
+        }
 
     def verify_batch(
         self, items: Sequence[Mapping[str, Any]]

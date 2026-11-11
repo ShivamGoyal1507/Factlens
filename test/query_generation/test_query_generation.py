@@ -5,7 +5,11 @@ import pytest
 
 import src.query_generation.generator as generator
 from src.query_generation import slm_client
-from src.query_generation.subquery_generator import filter_queries, parse_queries
+from src.query_generation.subquery_generator import (
+    filter_queries,
+    parse_entities,
+    parse_queries,
+)
 
 CLAIM = "India launched its first AI-powered agricultural satellite in 2025."
 
@@ -132,6 +136,36 @@ def test_parse_queries_formats():
         "first query",
         "second query",
     ]
+
+
+def test_parse_entities_fixes_case_but_rejects_invented_names():
+    response = json.dumps({
+        "entities": ["Rahul Gandhi", "India", "Narendra Modi"],
+        "queries": ["Rahul Gandhi"],
+    })
+    claim = "rahul gandhi is prime minister of india"
+
+    assert parse_entities(response, claim) == ["Rahul Gandhi", "India"]
+
+
+def test_search_plan_adds_entity_query(monkeypatch):
+    monkeypatch.setattr(slm_client, "generate_chat", _fake_model(raw=json.dumps({
+        "entities": ["Rahul Gandhi", "India"],
+        "queries": [
+            "Who is the Prime Minister of India",
+            "Prime Minister of India Rahul Gandhi",
+        ],
+    })))
+
+    plan = generator.generate_search_plan("rahul gandhi is prime minister of india")
+
+    assert plan["entities"] == ["Rahul Gandhi", "India"]
+    assert plan["queries"][:2] == [
+        "Who is the Prime Minister of India",
+        "Prime Minister of India Rahul Gandhi",
+    ]
+    assert "Rahul Gandhi" in plan["queries"]
+    assert "India" not in plan["queries"]  # one-word entity skipped
 
 
 def test_empty_claim_returns_no_queries():

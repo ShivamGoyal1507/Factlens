@@ -7,13 +7,26 @@ class EvidenceSelector:
         max_per_source=None,
         min_score=None,
         deduplicate=True,
+        group_by="source",
+        score_field="rerank_score",
     ):
+        """
+        group_by:
+            "source" - limit counts per source name ("Wikipedia", "NewsAPI").
+                       Note: all Wikipedia articles then share ONE slot.
+            "url"    - limit counts per article/document.
+        score_field: score used for min_score filtering.
+        """
+        if group_by not in {"source", "url"}:
+            raise ValueError("group_by must be 'source' or 'url'")
         if max_per_source is not None and max_per_source < 1:
             raise ValueError("max_per_source must be positive or None")
 
         self.max_per_source = max_per_source
         self.min_score = min_score
         self.deduplicate = deduplicate
+        self.group_by = group_by
+        self.score_field = score_field
 
     @staticmethod
     def normalize_text(text):
@@ -21,6 +34,13 @@ class EvidenceSelector:
             return ""
 
         return re.sub(r"\s+", " ", text.lower()).strip()
+
+    def get_group_key(self, passage):
+        if self.group_by == "url":
+            url = passage.get("url")
+            if isinstance(url, str) and url.strip():
+                return url.strip().lower()
+        return self.get_source_key(passage)
 
     @staticmethod
     def get_source_key(passage):
@@ -58,12 +78,12 @@ class EvidenceSelector:
                 continue
 
             if self.min_score is not None:
-                score = candidate.get("rerank_score")
+                score = candidate.get(self.score_field)
 
                 if score is None or score < self.min_score:
                     continue
 
-            source_key = self.get_source_key(candidate)
+            source_key = self.get_group_key(candidate)
 
             if self.max_per_source is not None:
                 if source_counts.get(source_key, 0) >= self.max_per_source:

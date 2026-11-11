@@ -20,6 +20,10 @@ EXPORTED_ADAPTER_DIR = (
 BASE_MODEL_DIR = MODEL_OUTPUT_DIR / "fever-deberta-v3-base"
 
 MAX_LENGTH = 256
+
+# Seed used by final-train-classifier.ipynb before creating the model. The
+# frozen, unsaved DeBERTa pooler depends on it (see ClaimVerifier.__init__).
+TRAINING_SEED = 42
 NUM_LABELS = 3
 LABEL2ID = {
     "SUPPORTS": 0,

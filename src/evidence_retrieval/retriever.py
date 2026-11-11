@@ -1,3 +1,5 @@
+import os
+
 from src.evidence_retrieval.sources.wikipedia import search_wikipedia
 from src.evidence_retrieval.sources.gdelt import search_gdelt
 from src.evidence_retrieval.sources.newsapi import search_newsapi
@@ -122,14 +124,21 @@ def retrieve_evidence(query, claim_made_at=None):
     return unique_results
 
 
-def _retrieve_evidence_for_single_query(query):
+# GDELT allows one request per 5 s per IP, so only the first few queries of
+# a claim are sent to it (the rest use Wikipedia and NewsAPI only).
+GDELT_MAX_QUERIES_PER_CLAIM = int(os.environ.get("FACTLENS_GDELT_MAX_QUERIES", "2"))
+
+
+def _retrieve_evidence_for_single_query(query, include_gdelt=True):
     """Internal helper for source retrieval, validation, and deduplication."""
     if not isinstance(query, str) or not query.strip():
         print("Invalid query. Please provide a non-empty search query.")
         return []
 
     wikipedia_results = safe_retrieve("Wikipedia", search_wikipedia, query)
-    gdelt_results = safe_retrieve("GDELT", search_gdelt, query)
+    gdelt_results = (
+        safe_retrieve("GDELT", search_gdelt, query) if include_gdelt else []
+    )
     newsapi_results = safe_retrieve("NewsAPI", search_newsapi, query)
 
     all_results = wikipedia_results + gdelt_results + newsapi_results
@@ -155,8 +164,11 @@ def retrieve_evidence_for_claim(claim, queries=None, claim_made_at=None):
         return []
 
     all_documents = []
-    for query in queries:
-        documents = _retrieve_evidence_for_single_query(query)
+    for index, query in enumerate(queries):
+        documents = _retrieve_evidence_for_single_query(
+            query,
+            include_gdelt=index < GDELT_MAX_QUERIES_PER_CLAIM,
+        )
         all_documents.extend(documents)
 
     deduplicated = remove_duplicates(all_documents)
@@ -280,10 +292,24 @@ def prepare_for_ranking(documents):
             continue
 
         text = doc.get("text", "")
+        title = doc.get("title")
+        text_from_title = False
+
+        # GDELT returns headlines only (no article body). Use the headline as
+        # the passage text so GDELT results can be ranked and verified instead
+        # of being silently dropped.
+        if (
+            (not isinstance(text, str) or not text.strip())
+            and doc.get("source") == "GDELT"
+            and isinstance(title, str)
+            and title.strip()
+        ):
+            text = title.strip()
+            text_from_title = True
+
         if not isinstance(text, str) or not text.strip():
             continue
 
-        title = doc.get("title")
         url = doc.get("url")
         source = doc.get("source")
 
@@ -295,6 +321,8 @@ def prepare_for_ranking(documents):
             continue
 
         prepared = dict(doc)
+        prepared["text"] = text
+        prepared["text_from_title"] = text_from_title
         prepared["published_date"] = doc.get("date")
         ranking_ready.append(prepared)
 

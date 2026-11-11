@@ -34,15 +34,22 @@ class CandidateMerger:
         ).hexdigest()[:16]
 
     def merge(self, bm25_results, dense_results, top_k=40):
+        return self.merge_many(
+            [("bm25", bm25_results), ("dense", dense_results)],
+            top_k=top_k,
+        )
+
+    def merge_many(self, rankings, top_k=40):
+        """
+        Reciprocal-rank-fuse any number of rankings.
+
+        rankings: list of (method_name, results) pairs, e.g.
+            [("bm25", ...), ("dense", ...), ("bm25:q1", ...), ...]
+        """
         if top_k <= 0:
             return []
 
         combined = {}
-
-        rankings = [
-            ("bm25", bm25_results),
-            ("dense", dense_results)
-        ]
 
         for method, results in rankings:
             seen_in_ranking = set()

@@ -13,6 +13,8 @@ from .generator import (
     generate_queries_with_llm,
     generate_queries_with_metadata,
     generate_queries_with_smol,
+    generate_search_plan,
+    normalize_claim,
 )
 
 from .validator import (
@@ -24,6 +26,8 @@ from .validator import (
 
 __all__ = [
     "generate_queries",
+    "generate_search_plan",
+    "normalize_claim",
     "generate_queries_with_llm",
     "generate_queries_with_metadata",
     "generate_queries_with_smol",
