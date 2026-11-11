@@ -25,6 +25,7 @@ import torch  # noqa: E402,F401
 
 import argparse  # noqa: E402
 import json  # noqa: E402
+import threading  # noqa: E402
 from functools import lru_cache  # noqa: E402
 from typing import Any  # noqa: E402
 
@@ -56,6 +57,12 @@ def _cross_encoder(name: str):
 @lru_cache(maxsize=1)
 def _verifier() -> ClaimVerifier:
     return ClaimVerifier()
+
+
+# The query-generation LLM is not safe to call from several threads at once;
+# prepare_claim() may run in worker threads (batch evaluation), so it is
+# serialised. Retrieval itself runs concurrently.
+_QUERY_MODEL_LOCK = threading.Lock()
 
 
 def rank_evidence(
@@ -167,8 +174,69 @@ def rank_evidence(
     }
 
 
-def run_pipeline(
+def prepare_claim(
     claim: str,
+    *,
+    use_query_generation: bool = True,
+    claim_made_at: str | None = None,
+    verbose: bool = True,
+) -> dict[str, Any]:
+    """
+    Network stage: query generation and evidence retrieval.
+
+    Thread-safe, so batch evaluation can retrieve evidence for upcoming
+    claims in worker threads while the GPU stage (finish_claim) runs.
+    """
+    if not isinstance(claim, str) or not claim.strip():
+        raise ValueError("claim must be a non-empty string")
+
+    claim = claim.strip()
+
+    # 1. Query generation: neutral + claim-specific queries, entity queries,
+    #    and the claim's named entities (used later for entity-aware ranking).
+    #    Falls back to the raw claim (and capitalised spans as entities) if
+    #    generation is disabled or yields nothing.
+    if use_query_generation:
+        with _QUERY_MODEL_LOCK:
+            plan = generate_search_plan(claim)
+    else:
+        plan = {"queries": [], "entities": []}
+    queries = plan["queries"] or [claim]
+    entities = plan["entities"] or _extract_named_entities(claim)
+    if verbose:
+        print("\n===== GENERATED QUERIES =====")
+        for index, query in enumerate(queries, 1):
+            print(f"{index}. {query}")
+        print("Entities:", ", ".join(entities) if entities else "(none)")
+
+    # The verifier was trained on FEVER claims (proper capitalisation, final
+    # period) and is case-sensitive, so normalise the claim for ranking,
+    # verification and explanation.
+    normalized_claim = normalize_claim(claim, entities)
+    if verbose:
+        print("Normalized claim:", normalized_claim)
+
+    # 2. Evidence retrieval: the Wikipedia pages the claim mentions, then
+    #    every query; merged and de-duplicated.
+    retrieved_documents = retrieve_evidence_for_claim(
+        normalized_claim,
+        queries=queries,
+        claim_made_at=claim_made_at,
+        entities=entities,
+    )
+    ranking_documents = prepare_for_ranking(retrieved_documents)
+    return {
+        "claim": claim,
+        "normalized_claim": normalized_claim,
+        "queries": queries,
+        "entities": entities,
+        "retrieved_documents": retrieved_documents,
+        "ranking_documents": ranking_documents,
+    }
+
+
+def finish_claim(
+    prepared: dict[str, Any],
     *,
     passage_sentences: int = 3,
     passage_overlap: int = 1,
@@ -181,54 +249,17 @@ def run_pipeline(
     dense_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
     cross_encoder_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
     include_explanation: bool = True,
-    use_query_generation: bool = True,
-    claim_made_at: str | None = None,
     verifier_rerank_weight: float = 5.0,
     verifier_rerank_pool: int = 30,
 ) -> dict[str, Any]:
-    """Run query generation, retrieval, ranking, verification and explanation."""
-    if not isinstance(claim, str) or not claim.strip():
-        raise ValueError("claim must be a non-empty string")
-    if evidence_top_k < 1:
-        raise ValueError("evidence_top_k must be positive")
-    if max_evidence_per_source is not None and max_evidence_per_source < 1:
-        raise ValueError(
-            "max_evidence_per_source must be positive or None"
-        )
+    """Model stage: ranking, verification and (optionally) explanation."""
+    claim = prepared["claim"]
+    normalized_claim = prepared["normalized_claim"]
+    queries = prepared["queries"]
+    entities = prepared["entities"]
+    retrieved_documents = prepared["retrieved_documents"]
+    ranking_documents = prepared["ranking_documents"]
 
-    claim = claim.strip()
-
-    # 1. Query generation: neutral + claim-specific queries, entity queries,
-    #    and the claim's named entities (used later for entity-aware ranking).
-    #    Falls back to the raw claim (and capitalised spans as entities) if
-    #    generation is disabled or yields nothing.
-    plan = (
-        generate_search_plan(claim)
-        if use_query_generation
-        else {"queries": [], "entities": []}
-    )
-    queries = plan["queries"] or [claim]
-    entities = plan["entities"] or _extract_named_entities(claim)
-    print("\n===== GENERATED QUERIES =====")
-    for index, query in enumerate(queries, 1):
-        print(f"{index}. {query}")
-    print("Entities:", ", ".join(entities) if entities else "(none)")
-
-    # The verifier was trained on FEVER claims (proper capitalisation, final
-    # period) and is case-sensitive, so normalise the claim for ranking,
-    # verification and explanation.
-    normalized_claim = normalize_claim(claim, entities)
-    print("Normalized claim:", normalized_claim)
-
-    # 2. Evidence retrieval: the Wikipedia pages the claim mentions, then
-    #    every query; merged and de-duplicated.
-    retrieved_documents = retrieve_evidence_for_claim(
-        normalized_claim,
-        queries=queries,
-        claim_made_at=claim_made_at,
-        entities=entities,
-    )
-    ranking_documents = prepare_for_ranking(retrieved_documents)
     if not ranking_documents:
         # Every source failed or was rate-limited: without evidence the only
         # honest verdict is NEI, so report that instead of crashing.
@@ -325,6 +356,59 @@ def run_pipeline(
             "explanation_generated": explanation is not None,
         },
     }
+
+
+def run_pipeline(
+    claim: str,
+    *,
+    passage_sentences: int = 3,
+    passage_overlap: int = 1,
+    bm25_top_k: int = 30,
+    dense_top_k: int = 30,
+    merged_top_k: int = 60,
+    reranked_top_k: int = 30,
+    evidence_top_k: int = 5,
+    max_evidence_per_source: int | None = 10,
+    dense_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    cross_encoder_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    include_explanation: bool = True,
+    use_query_generation: bool = True,
+    claim_made_at: str | None = None,
+    verifier_rerank_weight: float = 5.0,
+    verifier_rerank_pool: int = 30,
+) -> dict[str, Any]:
+    """Run query generation, retrieval, ranking, verification and explanation."""
+    if not isinstance(claim, str) or not claim.strip():
+        raise ValueError("claim must be a non-empty string")
+    if evidence_top_k < 1:
+        raise ValueError("evidence_top_k must be positive")
+    if max_evidence_per_source is not None and max_evidence_per_source < 1:
+        raise ValueError(
+            "max_evidence_per_source must be positive or None"
+        )
+
+    claim = claim.strip()
+    prepared = prepare_claim(
+        claim,
+        use_query_generation=use_query_generation,
+        claim_made_at=claim_made_at,
+    )
+    return finish_claim(
+        prepared,
+        passage_sentences=passage_sentences,
+        passage_overlap=passage_overlap,
+        bm25_top_k=bm25_top_k,
+        dense_top_k=dense_top_k,
+        merged_top_k=merged_top_k,
+        reranked_top_k=reranked_top_k,
+        evidence_top_k=evidence_top_k,
+        max_evidence_per_source=max_evidence_per_source,
+        dense_model_name=dense_model_name,
+        cross_encoder_model_name=cross_encoder_model_name,
+        include_explanation=include_explanation,
+        verifier_rerank_weight=verifier_rerank_weight,
+        verifier_rerank_pool=verifier_rerank_pool,
+    )
 
 
 def _no_evidence_result(

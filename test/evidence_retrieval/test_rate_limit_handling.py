@@ -70,3 +70,39 @@ def test_newsapi_article_text_combines_fields_and_strips_marker():
         "NEW DELHI: Narendra Modi took oath on Sunday for a third term."
     )
     assert newsapi.article_text({"description": None, "content": None}) == ""
+
+
+def test_wikipedia_concurrent_requests_respect_rate_and_concurrency(monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(wikipedia, "_MIN_REQUEST_INTERVAL", 0.02)
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0, "starts": []}
+
+    def fake_request(*args, **kwargs):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            state["starts"].append(time.monotonic())
+        time.sleep(0.1)  # simulated network latency
+        with lock:
+            state["active"] -= 1
+        return _response(200, {"query": {"search": []}})
+
+    monkeypatch.setattr(wikipedia, "request_with_retry", fake_request)
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda i: wikipedia._search_titles(f"query {i}", 5), range(12)))
+    elapsed = time.monotonic() - started
+
+    starts = sorted(state["starts"])
+    assert len(starts) == 12
+    assert state["peak"] <= wikipedia._MAX_IN_FLIGHT
+    assert state["peak"] > 1  # requests really overlap
+    # Wikimedia limits requests per minute, so check the average rate: 12
+    # sends need at least 11 intervals (single gaps may jitter by a few ms).
+    assert starts[-1] - starts[0] >= 11 * 0.02 * 0.95
+    assert elapsed < 12 * 0.1  # faster than sending one at a time
