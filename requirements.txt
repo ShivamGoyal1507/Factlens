@@ -13,7 +13,8 @@ python-dotenv==1.0.1
 # Retrieval and ranking
 rank-bm25==0.2.2
 spacy==3.8.7
-sentence-transformers==5.1.2
+# 6.x is required for the Transformers 5.x runtime recorded by the project.
+sentence-transformers==6.3.0
 
 # Classifier, query-generation helpers, and explanation generation
 torch==2.8.0
