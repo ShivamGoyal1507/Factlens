@@ -1,0 +1,28 @@
+# FACTLENS runtime dependencies.
+#
+# The Transformers and PEFT versions match the versions recorded in the
+# trained classifier run (experiments/classifier/output/.../run_summary.json
+# and adapter_config.json). Keep these pins together: the saved adapter
+# includes a trained classifier head and is restored through PEFT.
+
+# Numerical and HTTP foundations
+numpy==2.3.5
+requests==2.32.5
+python-dotenv==1.0.1
+
+# Retrieval and ranking
+rank-bm25==0.2.2
+spacy==3.8.7
+sentence-transformers==5.1.2
+
+# Classifier, query-generation helpers, and explanation generation
+torch==2.8.0
+transformers==5.22.2
+peft==0.21.2
+accelerate==1.10.1
+safetensors==0.6.2
+pydantic==2.11.7
+
+# After installing this file, install the sentence-boundary model used by
+# src/ranking/passage_splitter.py:
+# python -m spacy download en_core_web_sm
