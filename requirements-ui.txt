@@ -1,0 +1,7 @@
+# Optional Gradio web UI.
+#
+# Install the core runtime first:
+# python -m pip install -r requirements.txt
+# If the environment has a small disk quota, disable pip's cache:
+# python -m pip install --no-cache-dir -r requirements-ui.txt
+gradio==5.49.1
