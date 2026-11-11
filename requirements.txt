@@ -1,9 +1,8 @@
 # FACTLENS runtime dependencies.
 #
-# The Transformers and PEFT versions match the versions recorded in the
-# trained classifier run (experiments/classifier/output/.../run_summary.json
-# and adapter_config.json). Keep these pins together: the saved adapter
-# includes a trained classifier head and is restored through PEFT.
+# These dependencies cover the runtime code under src/ and main.py only.
+# Training notebooks and other files under experiments/ are intentionally
+# excluded.
 
 # Numerical and HTTP foundations
 numpy==2.3.5
@@ -19,6 +18,9 @@ sentence-transformers==6.3.0
 # Classifier, query-generation helpers, and explanation generation
 # Kaggle's Python 3.13 runtime has a compatible Torch 2.8 wheel.
 torch==2.8.0
+# Transformers imports image utilities during model imports. Keep torchvision
+# matched exactly with Torch to avoid missing torchvision operators in Kaggle.
+torchvision==0.23.0
 transformers==5.22.2
 peft==0.21.2
 accelerate==1.10.1
