@@ -12,16 +12,18 @@ python-dotenv==1.0.1
 
 # Retrieval and ranking
 rank-bm25==0.2.2
-spacy==3.8.7
+spacy==3.8.18
 # 6.x is required for the Transformers 5.x runtime recorded by the project.
 sentence-transformers==6.3.0
 
 # Classifier, query-generation helpers, and explanation generation
+# Kaggle's Python 3.13 runtime has a compatible Torch 2.8 wheel.
 torch==2.8.0
 transformers==5.22.2
 peft==0.21.2
 accelerate==1.10.1
-safetensors==0.6.2
+# Transformers 5.22.2 requires safetensors>=0.8.0.
+safetensors==0.8.0
 pydantic==2.11.7
 
 # After installing this file, install the sentence-boundary model used by
