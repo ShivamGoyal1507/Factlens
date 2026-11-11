@@ -1,7 +1,7 @@
 import torch
 from pydantic import BaseModel, Field
 from typing import Literal
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from transformers import AutoTokenizer, AutoModelForCausalLM
 
 class Evidence(BaseModel):
     text: str
@@ -16,11 +16,13 @@ class VerdictInput(BaseModel):
 class VerdictExplainer:
 
     def __init__(self):
-        self.model_name = "google/flan-t5-base"
+        self.model_name = "Qwen/Qwen2.5-0.5B-Instruct"
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(
+
+        self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
+            torch_dtype=torch.float16,
             device_map="auto"
         )
 
@@ -43,51 +45,32 @@ class VerdictExplainer:
         # evidence_text = "\n".join(f"Evidence {i} ({evidence.label}): {evidence.text}" for i, evidence in enumerate(data.evidences, 1))
         evidence_text = "\n".join(f"Evidence {i}: {evidence.text}" for i, evidence in enumerate(data.evidences, 1))
 
-        # prompt = f"""
-        #     You are a fact-checking explanation assistant.
-
-        #     Claim: {data.claim}
-
-        #     Verdict: {data.verdict}
-
-        #     Evidence:
-        #     {evidence_text}
-
-        #     Explain why the given verdict was reached in 2-3 simple sentences.
-
-        #     Instructions:
-        #     1. Use only the provided evidence.
-        #     2. Consider both supporting and opposing evidence.
-        #     3. Explain how the evidence relates to the claim.
-        #     4. If evidence conflicts, acknowledge the conflict.
-        #     5. If the verdict is Not Enough Information, explain why the evidence is insufficient to establish the claim.
-        #     6. Do not introduce external facts or invent information.
-        #     7. Do not change the given verdict.
-        #     8. Use simple, neutral language.
-
-        #     Return only the explanation.
-        #     """
-        # return prompt
-    
         prompt = f"""
-            Explain the following fact-checking result.
+            Fact-checking task:
 
             Claim: {data.claim}
+
             Verdict: {data.verdict}
 
             Evidence:
             {evidence_text}
 
-            Write a short explanation (2-3 sentences) describing
-            how the evidence supports the verdict.
+            Explain the verdict in 2 sentences.
 
-            Use only the evidence provided. 
-            If evidence conflicts, acknowledge the conflict.
-            Do not introduce external information.
+            'For SUPPORTED': Explain what evidence establishes the claim.
+
+            'For REFUTED': Explain what evidence contradicts the claim.
+
+            'For NOT ENOUGH INFORMATION': Explain why the evidence does not establish
+            whether the claim is true or false. Identify what cannot be concluded
+            from the available evidence.
+
+            Do not invent facts. Do not repeat the instructions.
+            Write only the explanation.
 
             Explanation:
             """
-
+        
         return prompt
 
     def explain(self, claim, verdict, evidences):
@@ -108,33 +91,77 @@ class VerdictExplainer:
         # generate prompt
         prompt = self.create_prompt(data)
 
-        # tokenize input
-        inputs = self.tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512
-        )
+        print(next(self.model.parameters()).dtype)
+        print(f"Model memory: {self.model.get_memory_footprint() / 1024**2:.2f} MB")
 
-        # generate explanation
-        inputs = {
-            key: value.to(self.model.device)
-            for key, value in inputs.items()
-        }
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an assistant that explains fact-checking results. Use only the provided evidence."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+
+        inputs = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt",
+            return_dict=True
+        ).to(self.model.device)
+
+        self.model.generation_config.temperature = None
+        self.model.generation_config.top_p = None
+        self.model.generation_config.top_k = None
+
         with torch.inference_mode():
             outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=100,
-                # min_new_tokens=20,
-                num_beams=4,
-                no_repeat_ngram_size=3,
-                early_stopping=True
+                max_new_tokens=120,
+                do_sample=False
             )
 
-        # decode output
+        generated_tokens = outputs[0][inputs["input_ids"].shape[-1]:]
+
         explanation = self.tokenizer.decode(
-            outputs[0],
+            generated_tokens,
             skip_special_tokens=True
         )
+
+        # # tokenize input
+        # inputs = self.tokenizer(
+        #     prompt,
+        #     return_tensors="pt",
+        #     truncation=True,
+        #     max_length=512
+        # )
+
+        # # generate explanation
+        # inputs = {
+        #     key: value.to(self.model.device)
+        #     for key, value in inputs.items()
+        # }
+        # with torch.inference_mode():
+        #     outputs = self.model.generate(
+        #         **inputs,
+        #         max_new_tokens=200,
+        #         # min_new_tokens=20,
+        #         num_beams=4,
+        #         repetition_penalty=1.2,
+        #         no_repeat_ngram_size=3,
+        #         early_stopping=True
+        #     )
+        
+        # print(next(self.model.parameters()).dtype)
+        # print(f"Model memory: {self.model.get_memory_footprint() / 1024**2:.2f} MB")
+
+        # # decode output
+        # explanation = self.tokenizer.decode(
+        #     outputs[0],
+        #     skip_special_tokens=True
+        # )
 
         return explanation.strip()
