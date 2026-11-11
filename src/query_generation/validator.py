@@ -19,6 +19,9 @@ INVALID_QUERY_PATTERNS = (
     "output:",
     "key points",
     "evidence request",
+    "return json",
+    "json only",
+    "maximum queries",
 )
 
 
@@ -97,6 +100,17 @@ def is_grounded_query(query, claim, analysis=None, min_overlap=0.15):
                     allowed_tokens.update(
                         re.findall(r"\b[a-zA-Z0-9]+\b", str(item).lower())
                     )
+
+    # Numbers (years, amounts) must not be invented by the model.
+    allowed_numbers = {t for t in allowed_tokens if t.isdigit()}
+    if isinstance(analysis, dict):
+        for item in analysis.get("dates", []) or []:
+            allowed_numbers.update(re.findall(r"\d+", str(item)))
+    allowed_numbers.update(re.findall(r"\d+", claim))
+
+    for number in re.findall(r"\d+", query):
+        if number not in allowed_numbers:
+            return False
 
     overlap = query_tokens.intersection(allowed_tokens)
 

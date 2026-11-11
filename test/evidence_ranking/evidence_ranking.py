@@ -101,7 +101,7 @@ def main():
     )
 
     print(f"\nFinal evidence: {len(final_evidence)}")
-
+    print(final_evidence)
     for evidence in final_evidence:
         print(f"\nRank: {evidence['evidence_rank']}")
         print(f"Title: {evidence.get('title', '')}")

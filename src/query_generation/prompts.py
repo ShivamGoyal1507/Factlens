@@ -1,78 +1,78 @@
+"""Chat prompts used by the SLM-based query generation stage."""
 
-CLAIM_ANALYSIS_PROMPT = """
-Task: Analyze the factual claim and extract only information
-explicitly stated in it.
+import json
 
+
+QUERY_SYSTEM_PROMPT = """You write web search queries for a fact-checking system.
+Given a claim, write short keyword-style search queries (like what a journalist would type into Google or a news search) that would find evidence to verify or refute it.
+Rules:
+- Each query checks a different factual part of the claim (who, what, when, where, numbers, "first/only" superlatives).
+- Use only names, dates, numbers and terms that appear in the claim. Never invent facts or answer the claim.
+- Keep negations and qualifiers that change meaning.
+- 3 to 10 words per query. No explanations.
+Return JSON only: {"queries": ["...", "..."]}"""
+
+
+# Few-shot examples steer small models toward the exact output format.
+QUERY_FEW_SHOT = [
+    (
+        "Tesla acquired Twitter for $44 billion in 2022.",
+        3,
+        [
+            "Twitter acquisition $44 billion 2022",
+            "who acquired Twitter in 2022",
+            "Tesla Twitter acquisition",
+        ],
+    ),
+    (
+        "The Eiffel Tower is in Paris.",
+        1,
+        ["Eiffel Tower location Paris"],
+    ),
+]
+
+
+def _query_user_message(claim, max_queries):
+    return f"Claim: {claim}\nMaximum queries: {max_queries}"
+
+
+def build_query_messages(claim, max_queries):
+    """Build chat messages asking the SLM for up to `max_queries` queries."""
+    messages = [{"role": "system", "content": QUERY_SYSTEM_PROMPT}]
+
+    for example_claim, example_max, example_queries in QUERY_FEW_SHOT:
+        messages.append(
+            {"role": "user", "content": _query_user_message(example_claim, example_max)}
+        )
+        messages.append(
+            {"role": "assistant", "content": json.dumps({"queries": example_queries})}
+        )
+
+    messages.append({"role": "user", "content": _query_user_message(claim, max_queries)})
+    return messages
+
+
+CLAIM_ANALYSIS_SYSTEM_PROMPT = """You analyse factual claims for a fact-checking system.
+Extract only information explicitly stated in the claim. Do not add background facts.
 Return exactly one JSON object with these fields:
-
-{{
-    "subject": "main subject",
-    "actions": [],
-    "objects": [],
-    "entities": [],
-    "keywords": [],
-    "dates": [],
-    "relationships": [],
-    "components": []
-}}
-
-Rules:
-1. Extract every action stated in the claim.
-2. Extract named people, organisations, places and products.
-3. Do not treat generic descriptions as named entities.
-4. Preserve important technical terms and qualifiers.
-5. Preserve negation and the meaning of relationships.
-6. Dates must remain exactly as stated.
-7. Split independent factual assertions into separate components.
-8. Do not add capabilities, outcomes, explanations or background facts.
-9. Use empty arrays when no information is available.
-10. Return valid JSON only. No markdown or explanations.
-
-Claim:
-{claim}
-
-JSON:
-"""
+{"subject": "", "actions": [], "objects": [], "entities": [], "keywords": [], "dates": [], "relationships": [], "components": []}
+- entities: named people, organisations, places and products.
+- dates: exactly as written in the claim.
+- components: the claim split into independent factual assertions.
+Use empty arrays when nothing applies. Return JSON only."""
 
 
-QUERY_GENERATION_PROMPT = """
-Task: Generate search queries for a fact-checking system.
+def build_analysis_messages(claim):
+    return [
+        {"role": "system", "content": CLAIM_ANALYSIS_SYSTEM_PROMPT},
+        {"role": "user", "content": f"Claim: {claim}"},
+    ]
 
-You will receive:
-1. The original factual claim.
-2. A structured analysis of the claim.
-3. Its complexity classification.
 
-Generate only the search queries necessary to investigate
-the factual components.
-
-Rules:
-1. Every query must investigate an aspect of the original claim.
-2. Use the supplied entities, keywords, dates, actions and relationships.
-3. Preserve the original meaning, including negation and qualifiers.
-4. Do not invent names, dates, events, capabilities or outcomes.
-5. Do not introduce outside facts.
-6. Each query must investigate a distinct factual aspect.
-7. Do not produce multiple queries that investigate the same aspect.
-8. Do not generate queries merely to reach the maximum count.
-9. Queries must be concise, grammatical and suitable for a search engine.
-10. Use natural search-engine phrasing rather than awkward keyword fragments.
-11. Prefer specific questions when they help investigate a factual component.
-12. Return valid JSON only, using exactly this structure:
-
-{{"queries": ["query one", "query two"]}}
-
-Original claim:
-{claim}
-
-Claim analysis:
-{analysis}
-
-Complexity:
-{complexity}
-
-Maximum number of queries:
-{max_queries}
-
-JSON:
-"""
+__all__ = [
+    "QUERY_SYSTEM_PROMPT",
+    "QUERY_FEW_SHOT",
+    "CLAIM_ANALYSIS_SYSTEM_PROMPT",
+    "build_query_messages",
+    "build_analysis_messages",
+]

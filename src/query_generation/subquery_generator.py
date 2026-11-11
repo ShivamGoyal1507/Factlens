@@ -1,139 +1,104 @@
+"""SLM-based search-query generation (Qwen2.5-Instruct by default)."""
 
 import json
 import re
 
-from src.query_generation.complexity import get_max_queries
-from src.query_generation.prompts import QUERY_GENERATION_PROMPT
+from src.query_generation import slm_client
+from src.query_generation.prompts import build_query_messages
 from src.query_generation.validator import (
-    is_valid_query,
     is_grounded_query,
+    is_valid_query,
     remove_duplicate_queries,
 )
 
 
-def _parse_json_queries(response):
-    if not isinstance(response, str):
-        return []
-
-    response = response.strip()
-
-    # Locate the JSON object if the model adds surrounding text.
-    start = response.find("{")
-    end = response.rfind("}")
-
-    if start < 0 or end <= start:
-        return []
-
-    try:
-        data = json.loads(response[start:end + 1])
-    except json.JSONDecodeError:
-        return []
-
-    if not isinstance(data, dict):
-        return []
-
-    queries = data.get("queries")
-
-    if not isinstance(queries, list):
-        return []
-
-    return [
-        item.strip()
-        for item in queries
-        if isinstance(item, str) and item.strip()
-    ]
+def _clean(text):
+    return " ".join(str(text).strip().split()).strip("\"'`")
 
 
-def generate_subqueries(claim, analysis, complexity):
+def parse_queries(response):
     """
-    Generate search queries using FLAN-T5-Base.
+    Extract a list of query strings from the model response.
 
-    Stage 2 receives the original claim and the validated
-    Stage 1 analysis.
+    Accepts {"queries": [...]}, a bare JSON list, or (as a last resort)
+    one query per line.
     """
+    if isinstance(response, dict):
+        response = response.get("text", "")
+    if not isinstance(response, str) or not response.strip():
+        return []
 
+    text = response.strip()
+    # Strip markdown code fences if present.
+    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE)
+
+    for start_char, end_char in (("{", "}"), ("[", "]")):
+        start = text.find(start_char)
+        end = text.rfind(end_char)
+        if start == -1 or end <= start:
+            continue
+        try:
+            data = json.loads(text[start:end + 1])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            data = data.get("queries")
+        if isinstance(data, list):
+            return [_clean(q) for q in data if isinstance(q, str) and q.strip()]
+
+    # Fallback: one query per line (numbered or bulleted lists).
+    lines = []
+    for line in text.splitlines():
+        line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line)
+        line = _clean(line).rstrip(",")
+        if line and not line.endswith(":") and "{" not in line and "}" not in line:
+            lines.append(line)
+    return lines
+
+
+def _tokens(text):
+    return set(re.findall(r"[a-z0-9]+", text.lower()))
+
+
+def _near_duplicate(a, b, threshold=0.8):
+    ta, tb = _tokens(a), _tokens(b)
+    if not ta or not tb:
+        return False
+    return len(ta & tb) / len(ta | tb) >= threshold
+
+
+def filter_queries(candidates, claim, analysis=None, max_queries=5):
+    """Validate, ground and de-duplicate model output."""
+    kept = []
+    for query in remove_duplicate_queries(candidates):
+        if not is_valid_query(query):
+            continue
+        if not is_grounded_query(query, claim, analysis):
+            continue
+        if any(_near_duplicate(query, existing) for existing in kept):
+            continue
+        kept.append(query)
+        if len(kept) >= max_queries:
+            break
+    return kept
+
+
+def generate_subqueries(claim, max_queries=5, analysis=None, max_new_tokens=192):
+    """
+    Generate up to `max_queries` grounded search queries for `claim`.
+
+    Raises on model-loading/generation errors so the caller can fall back.
+    """
     if not isinstance(claim, str) or not claim.strip():
         return []
-
-    if not isinstance(analysis, dict):
-        return []
-
-    max_queries = get_max_queries(complexity)
-
     if max_queries < 1:
         return []
 
-    from src.query_generation.generator import (
-        _load_flant5_model,
-        _MODEL_CACHE,
-    )
+    messages = build_query_messages(claim, max_queries)
+    result = slm_client.generate_chat(messages, max_new_tokens=max_new_tokens)
+    candidates = parse_queries(result)
 
-    loaded = _load_flant5_model()
-
-    if loaded is None:
-        return []
-
-    tokenizer, model = loaded
-
-    import torch
-
-    prompt = QUERY_GENERATION_PROMPT.format(
-        claim=claim,
-        analysis=json.dumps(analysis, ensure_ascii=False),
-        complexity=complexity,
-        max_queries=max_queries,
-    )
-
-    device = _MODEL_CACHE["device"]
-
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=False,
-    )
-
-    input_length = inputs["input_ids"].shape[1]
-
-    if input_length > 512:
-        raise ValueError(
-            f"Query-generation prompt has {input_length} tokens; "
-            "maximum is 512. Shorten the prompt safely."
-        )
-
-    inputs = {
-        key: value.to(device)
-        for key, value in inputs.items()
-    }
-
-    with torch.inference_mode():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=128,
-            do_sample=False,
-            num_beams=4,
-            num_return_sequences=1,
-            repetition_penalty=1.1,
-            early_stopping=True,
-        )
-
-    response = tokenizer.decode(
-        outputs[0],
-        skip_special_tokens=True,
-    )
-
-    candidates = _parse_json_queries(response)
-
-    valid = []
-
-    
-    for query in candidates:
-        if not is_valid_query(query):
-            continue
-
-        if not is_grounded_query(query, claim, analysis):
-            continue
-
-        valid.append(query)
+    return filter_queries(candidates, claim, analysis, max_queries)
 
 
-    return remove_duplicate_queries(valid)[:max_queries]
+__all__ = ["parse_queries", "filter_queries", "generate_subqueries"]

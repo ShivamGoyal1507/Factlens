@@ -22,7 +22,7 @@ def _as_string_list(value):
 
 
 def _parse_analysis(response):
-    """Parse the JSON object returned by FLAN-T5."""
+    """Parse the JSON object returned by the SLM."""
     if not isinstance(response, str):
         return None
 
@@ -145,10 +145,10 @@ def _validate_analysis(data, original_claim):
 
 def analyze_claim(claim):
     """
-    Analyze a factual claim using the existing FLAN-T5-base model.
+    Analyze a factual claim with the shared SLM (see slm_client.py).
 
     Returns:
-        dict: subject, actions, objects, entities, dates,
+        dict: subject, actions, objects, entities, keywords, dates,
               relationships and factual components.
     """
     if not isinstance(claim, str) or not claim.strip():
@@ -157,53 +157,14 @@ def analyze_claim(claim):
     claim = _clean_text(claim)
 
     try:
-        # Import lazily to reuse the model already loaded by generator.py.
-        from src.query_generation.generator import _load_flant5_model
-        from src.query_generation.generator import _MODEL_CACHE
-        from src.query_generation.prompts import CLAIM_ANALYSIS_PROMPT
+        from src.query_generation import slm_client
+        from src.query_generation.prompts import build_analysis_messages
 
-        loaded = _load_flant5_model()
-
-        if loaded is None:
-            return _fallback_analysis(claim)
-
-        tokenizer, model = loaded
-
-        prompt = CLAIM_ANALYSIS_PROMPT.format(claim=claim)
-
-        import torch
-
-        device = _MODEL_CACHE.get("device")
-
-        inputs = tokenizer(
-            prompt,
-            return_tensors="pt",
-            truncation=True,
-            max_length=512,
+        result = slm_client.generate_chat(
+            build_analysis_messages(claim),
+            max_new_tokens=256,
         )
-
-        if device is not None and str(device) != "cpu":
-            inputs = {
-                key: value.to(device)
-                for key, value in inputs.items()
-            }
-
-        with torch.inference_mode():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=192,
-                do_sample=False,
-                num_beams=4,
-                num_return_sequences=1,
-                repetition_penalty=1.1,
-            )
-
-        response = tokenizer.decode(
-            outputs[0],
-            skip_special_tokens=True,
-        )
-
-        parsed = _parse_analysis(response)
+        parsed = _parse_analysis(result["text"])
 
         if parsed is None:
             return _fallback_analysis(claim)

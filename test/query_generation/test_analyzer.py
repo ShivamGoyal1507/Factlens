@@ -79,6 +79,7 @@ def test_fallback_returns_expected_structure():
         "actions",
         "objects",
         "entities",
+        "keywords",
         "dates",
         "relationships",
         "components",

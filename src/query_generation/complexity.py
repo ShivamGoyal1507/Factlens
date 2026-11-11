@@ -56,7 +56,15 @@ def claim_complexity_score(claim, analysis=None):
 
     # Important qualifiers.
     if re.search(
-        r"\b(first|only|largest|smallest|oldest|latest)\b",
+        r"\b(first|only|largest|smallest|oldest|latest|most|least|"
+        r"biggest|highest|lowest|best|worst)\b",
+        lower,
+    ):
+        score += 1
+
+    # Quantities (money, percentages, large numbers) are separately checkable.
+    if re.search(
+        r"[$€£₹]\s?\d|\d\s?%|\b\d[\d,.]*\s*(?:million|billion|trillion|percent)\b",
         lower,
     ):
         score += 1
