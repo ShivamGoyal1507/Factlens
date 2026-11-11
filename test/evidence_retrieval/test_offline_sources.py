@@ -256,8 +256,8 @@ def test_missing_dates_and_empty_text_are_allowed():
 
 
 def test_exact_claim_timestamp_filters_before_and_after():
-    query = "Claim made at 2026-11-01T10:30:00+05:30"
-    claim_cutoff = get_temporal_cutoff_for_claim(query)
+    claim_made_at = "2026-11-01T10:30:00+05:30"
+    claim_cutoff = get_temporal_cutoff_for_claim(claim_made_at)
     assert claim_cutoff is not None
     assert claim_cutoff.isoformat() == "2026-11-01T05:00:00+00:00"
 
@@ -268,13 +268,13 @@ def test_exact_claim_timestamp_filters_before_and_after():
         {"title": "Later same day", "url": "https://example.com/later_same_day", "source": "NewsAPI", "date": "2026-11-01T12:00:00Z", "seen_date": None, "text": "later"},
     ]
 
-    filtered = filter_by_claim_date(documents, query)
+    filtered = filter_by_claim_date(documents, claim_made_at=claim_made_at)
     assert [doc["title"] for doc in filtered] == ["Before", "Exact"]
 
 
 def test_date_only_claim_filters_by_end_of_claim_day():
-    query = "Claim made on 2026-11-01"
-    cutoff = get_temporal_cutoff_for_claim(query)
+    claim_made_at = "2026-11-01"
+    cutoff = get_temporal_cutoff_for_claim(claim_made_at)
     assert cutoff is not None
     assert cutoff.isoformat() == "2026-11-01T23:59:59.999999+00:00"
 
@@ -284,20 +284,30 @@ def test_date_only_claim_filters_by_end_of_claim_day():
         {"title": "Same day but later", "url": "https://example.com/same-day-later", "source": "NewsAPI", "date": "2026-11-01T23:59:59.999999Z", "seen_date": None, "text": "later same day"},
     ]
 
-    filtered = filter_by_claim_date(documents, query)
+    filtered = filter_by_claim_date(documents, claim_made_at=claim_made_at)
     assert [doc["title"] for doc in filtered] == ["On claim date", "Same day but later"]
 
 
 def test_missing_or_invalid_publication_timestamps_are_excluded_when_filtering_active():
-    query = "Claim date: 2026-11-01"
+    claim_made_at = "2026-11-01"
     documents = [
         {"title": "Missing date", "url": "https://example.com/missing", "source": "NewsAPI", "date": None, "seen_date": None, "text": "missing"},
         {"title": "Invalid date", "url": "https://example.com/invalid", "source": "NewsAPI", "date": "not-a-date", "seen_date": None, "text": "invalid"},
         {"title": "Valid date", "url": "https://example.com/valid", "source": "NewsAPI", "date": "2026-11-01T12:00:00Z", "seen_date": None, "text": "ok"},
     ]
 
-    filtered = filter_by_claim_date(documents, query)
+    filtered = filter_by_claim_date(documents, claim_made_at=claim_made_at)
     assert [doc["title"] for doc in filtered] == ["Valid date"]
+
+
+def test_query_text_alone_does_not_activate_temporal_filtering():
+    documents = [
+        {"title": "Before", "url": "https://example.com/before", "source": "NewsAPI", "date": "2026-11-09T23:59:59Z", "seen_date": None, "text": "before"},
+        {"title": "After", "url": "https://example.com/after", "source": "NewsAPI", "date": "2026-11-11T00:00:00Z", "seen_date": None, "text": "after"},
+    ]
+
+    query = "Claim made on 2026-11-10"
+    assert filter_by_claim_date(documents, query=query) == documents
 
 
 def test_gdelt_seen_date_is_never_used_as_publication_timestamp():
@@ -307,7 +317,7 @@ def test_gdelt_seen_date_is_never_used_as_publication_timestamp():
         {"title": "Real article", "url": "https://example.com/gdelt-real", "source": "GDELT", "date": "2026-11-01T10:00:00Z", "seen_date": "20261101T120000Z", "text": "content"},
     ]
 
-    filtered = filter_by_claim_date(documents, query)
+    filtered = filter_by_claim_date(documents, claim_made_at="2026-11-01")
     assert [doc["title"] for doc in filtered] == ["Real article"]
 
 
@@ -318,49 +328,71 @@ def test_wikipedia_revision_times_are_never_used_as_publication_timestamps():
         {"title": "Wikipedia updated after claim", "url": "https://en.wikipedia.org/wiki/Test2", "source": "Wikipedia", "date": "2026-11-02T00:00:00Z", "seen_date": None, "text": "content"},
     ]
 
-    filtered = filter_by_claim_date(documents, query)
+    filtered = filter_by_claim_date(documents, claim_made_at="2026-11-01")
     assert [doc["title"] for doc in filtered] == []
 
 
-def test_newsapi_published_at_is_normalized_and_used():
-    document = {
-        "title": "NewsAPI doc",
-        "url": "https://example.com/newsapi",
-        "source": "NewsAPI",
-        "date": "2024-01-02T00:00:00Z",
-        "seen_date": None,
-        "text": "content",
-    }
-
-    cutoff = get_temporal_cutoff_for_claim("Claim made at 2024-01-02T00:00:00Z")
-    assert cutoff is not None
-    assert document_is_temporally_eligible(document, cutoff)
-
-
-def test_ambiguous_or_unsupported_claim_dates_do_not_trigger_filtering():
-    assert get_temporal_cutoff_for_claim("The claim was mentioned in 2026") is None
-    assert get_temporal_cutoff_for_claim("Some rumor happened before summer") is None
-    constraint = extract_claim_date_constraint("Some rumor happened before summer")
-    assert constraint["precision"] == "unavailable"
-
-
-def test_no_claim_date_constraint_preserves_existing_retrieval_behavior():
+def test_generic_search_query_does_not_activate_temporal_filtering():
     documents = [
-        {"title": "Doc 1", "url": "https://example.com/1", "source": "NewsAPI", "date": "2026-11-02T00:00:00Z", "seen_date": None, "text": "text"},
-        {"title": "Doc 2", "url": "https://example.com/2", "source": "NewsAPI", "date": "2026-11-01T00:00:00Z", "seen_date": None, "text": "text"},
+        {"title": "Doc 1", "url": "https://example.com/1", "source": "NewsAPI", "date": "2024-12-31T23:59:59Z", "seen_date": None, "text": "old"},
+        {"title": "Doc 2", "url": "https://example.com/2", "source": "NewsAPI", "date": "2026-11-02T00:00:00Z", "seen_date": None, "text": "future"},
     ]
-    assert filter_by_claim_date(documents, "AI breakthroughs in India") == documents
+
+    assert filter_by_claim_date(documents, "AI breakthroughs in 2025") == documents
 
 
-def test_prepare_for_ranking_remains_compatible_after_temporal_filtering():
+def test_generic_retrieval_without_claim_made_at_keeps_all_evidence(monkeypatch):
+    from src.evidence_retrieval import retriever
+
     documents = [
-        {"title": "Doc", "url": "https://example.com/doc", "source": "NewsAPI", "date": "2026-11-01T12:00:00Z", "seen_date": None, "text": "body text"},
+        {"title": "Old evidence", "url": "https://example.com/old", "source": "NewsAPI", "date": "2024-01-01T00:00:00Z", "seen_date": None, "text": "old"},
+        {"title": "New evidence", "url": "https://example.com/new", "source": "NewsAPI", "date": "2026-11-02T00:00:00Z", "seen_date": None, "text": "new"},
     ]
-    prepared = prepare_for_ranking(documents)
-    assert len(prepared) == 1
-    assert prepared[0]["published_date"] == "2026-11-01T12:00:00Z"
-    assert prepared[0]["date"] == "2026-11-01T12:00:00Z"
-    assert prepared[0]["text"] == "body text"
+
+    monkeypatch.setattr(retriever, "safe_retrieve", lambda source_name, search_function, query: documents)
+    results = retriever.retrieve_evidence("AI breakthroughs in 2025")
+    assert len(results) == 2
+    assert {doc["title"] for doc in results} == {"Old evidence", "New evidence"}
+
+
+def test_explicit_claim_made_at_activates_filtering():
+    documents = [
+        {"title": "Before", "url": "https://example.com/before", "source": "NewsAPI", "date": "2026-11-09T23:59:59Z", "seen_date": None, "text": "before"},
+        {"title": "On day", "url": "https://example.com/on-day", "source": "NewsAPI", "date": "2026-11-10T00:00:00Z", "seen_date": None, "text": "on day"},
+        {"title": "After", "url": "https://example.com/after", "source": "NewsAPI", "date": "2026-11-11T00:00:00Z", "seen_date": None, "text": "after"},
+    ]
+
+    filtered = filter_by_claim_date(documents, "AI breakthroughs in 2025", claim_made_at="2026-11-10")
+    assert [doc["title"] for doc in filtered] == ["Before", "On day"]
+
+
+def test_date_only_evidence_uses_claim_timezone_not_utc(monkeypatch):
+    monkeypatch.setenv("CLAIM_TIMEZONE", "America/Los_Angeles")
+    claim_cutoff = get_temporal_cutoff_for_claim("2026-11-01")
+    assert claim_cutoff is not None
+    assert claim_cutoff.isoformat() == "2026-11-02T07:59:59.999999+00:00"
+
+    doc_same_local_day = {"title": "Local same day", "url": "https://example.com/local-same-day", "source": "NewsAPI", "date": "2026-11-01", "seen_date": None, "text": "same local day"}
+    doc_next_local_day = {"title": "Next local day", "url": "https://example.com/next-local-day", "source": "NewsAPI", "date": "2026-11-02", "seen_date": None, "text": "next local day"}
+
+    assert document_is_temporally_eligible(doc_same_local_day, claim_cutoff, claim_precision="date_only") is True
+    assert document_is_temporally_eligible(doc_next_local_day, claim_cutoff, claim_precision="date_only") is False
+
+
+def test_date_only_evidence_excluded_for_exact_timestamp_cutoff():
+    cutoff = get_temporal_cutoff_for_claim("2026-11-01T12:00:00Z")
+    doc = {"title": "Date-only doc", "url": "https://example.com/date-only", "source": "NewsAPI", "date": "2026-11-01", "seen_date": None, "text": "date-only"}
+    assert document_is_temporally_eligible(doc, cutoff, claim_precision="exact_timestamp") is False
+
+
+def test_query_explicitly_stating_claim_made_date_does_not_activate_filtering_without_claim_made_at():
+    documents = [
+        {"title": "Before", "url": "https://example.com/before", "source": "NewsAPI", "date": "2026-11-09T23:59:59Z", "seen_date": None, "text": "before"},
+        {"title": "After", "url": "https://example.com/after", "source": "NewsAPI", "date": "2026-11-11T00:00:00Z", "seen_date": None, "text": "after"},
+    ]
+
+    query = "Claim made on 2026-11-10"
+    assert filter_by_claim_date(documents, query=query) == documents
 
 
 @pytest.mark.live

@@ -29,36 +29,51 @@ def safe_retrieve(source_name, search_function, query):
         print(f"{source_name} retrieval failed: {error}")
         return []
 
+def _resolve_claim_cutoff_source(claim_made_at=None):
+    """Return an explicit claim-made cutoff only when the caller provides it."""
+    if isinstance(claim_made_at, str) and claim_made_at.strip():
+        return claim_made_at.strip()
 
-def filter_by_claim_date(documents, query=None):
+    if claim_made_at is not None:
+        return str(claim_made_at)
+
+    return None
+
+
+def filter_by_claim_date(documents, query=None, claim_made_at=None):
     """
     Keep only documents that were published on or before the claim cutoff.
-    If no valid claim-date constraint is present, keep the original documents.
+    Temporal filtering is enabled only when the caller explicitly provides
+    claim_made_at. A search query alone never activates filtering.
     """
     if not isinstance(documents, list):
         return []
 
-    if not query:
+    cutoff_source = _resolve_claim_cutoff_source(claim_made_at=claim_made_at)
+    if not cutoff_source:
         return list(documents)
 
-    cutoff = get_temporal_cutoff_for_claim(query)
+    cutoff = get_temporal_cutoff_for_claim(cutoff_source)
     if cutoff is None:
         return list(documents)
 
+    precision = get_claim_date_precision(cutoff_source)
     filtered = []
     for doc in documents:
-        if document_is_temporally_eligible(doc, cutoff):
+        if document_is_temporally_eligible(doc, cutoff, claim_precision=precision):
             filtered.append(doc)
 
     return filtered
 
 
-def retrieve_evidence(query):
+def retrieve_evidence(query, claim_made_at=None):
     """
     Retrieve evidence from Wikipedia, GDELT and NewsAPI.
 
     Args:
         query (str): Search query.
+        claim_made_at (str | None): Explicit claim-made date used to activate
+            temporal filtering. Search-query dates alone never trigger filtering.
 
     Returns:
         list: Combined evidence documents.
@@ -75,12 +90,20 @@ def retrieve_evidence(query):
     valid_results = validate_documents(all_results)
     unique_results = remove_duplicates(valid_results)
 
-    cutoff = get_temporal_cutoff_for_claim(query)
+    cutoff_source = claim_made_at if isinstance(claim_made_at, str) and claim_made_at.strip() else None
+    if cutoff_source is None and claim_made_at is not None:
+        cutoff_source = str(claim_made_at)
+
+    cutoff = None
+    precision = None
+    if cutoff_source is not None:
+        cutoff = get_temporal_cutoff_for_claim(cutoff_source)
+        precision = get_claim_date_precision(cutoff_source) if cutoff is not None else None
+
     if cutoff is not None:
-        precision = get_claim_date_precision(query)
         filtered = []
         for doc in unique_results:
-            if document_is_temporally_eligible(doc, cutoff):
+            if document_is_temporally_eligible(doc, cutoff, claim_precision=precision):
                 filtered_doc = dict(doc)
                 filtered_doc["temporal_precision"] = precision
                 filtered.append(filtered_doc)
@@ -97,6 +120,70 @@ def retrieve_evidence(query):
     print("Duplicates removed:", len(valid_results) - len(unique_results))
 
     return unique_results
+
+
+def _retrieve_evidence_for_single_query(query):
+    """Internal helper for source retrieval, validation, and deduplication."""
+    if not isinstance(query, str) or not query.strip():
+        print("Invalid query. Please provide a non-empty search query.")
+        return []
+
+    wikipedia_results = safe_retrieve("Wikipedia", search_wikipedia, query)
+    gdelt_results = safe_retrieve("GDELT", search_gdelt, query)
+    newsapi_results = safe_retrieve("NewsAPI", search_newsapi, query)
+
+    all_results = wikipedia_results + gdelt_results + newsapi_results
+    valid_results = validate_documents(all_results)
+    unique_results = remove_duplicates(valid_results)
+
+    return unique_results
+
+
+def retrieve_evidence_for_claim(claim, queries=None, claim_made_at=None):
+    """
+    Retrieve evidence for a claim using multiple generated subqueries while
+    preserving the original claim-made date as the sole temporal cutoff.
+    """
+    if not isinstance(claim, str) or not claim.strip():
+        return []
+
+    if queries is None:
+        from src.query_generation.generator import generate_queries
+        queries = generate_queries(claim)
+
+    if not isinstance(queries, list) or not queries:
+        return []
+
+    all_documents = []
+    for query in queries:
+        documents = _retrieve_evidence_for_single_query(query)
+        all_documents.extend(documents)
+
+    deduplicated = remove_duplicates(all_documents)
+
+    cutoff = None
+    cutoff_precision = None
+    cutoff_source = None
+
+    if isinstance(claim_made_at, str) and claim_made_at.strip():
+        cutoff_source = claim_made_at.strip()
+    elif claim_made_at is not None:
+        cutoff_source = str(claim_made_at)
+
+    if cutoff_source is not None:
+        cutoff = get_temporal_cutoff_for_claim(cutoff_source)
+        cutoff_precision = get_claim_date_precision(cutoff_source) if cutoff is not None else None
+
+    if cutoff is not None:
+        filtered = []
+        for doc in deduplicated:
+            if document_is_temporally_eligible(doc, cutoff, claim_precision=cutoff_precision):
+                filtered_doc = dict(doc)
+                filtered_doc["temporal_precision"] = cutoff_precision
+                filtered.append(filtered_doc)
+        deduplicated = filtered
+
+    return deduplicated
 
 
 def remove_duplicates(documents):

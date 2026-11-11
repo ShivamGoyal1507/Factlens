@@ -64,7 +64,7 @@ def normalize_seen_date(value):
         return None
 
 
-def _parse_iso_datetime(value):
+def _parse_iso_datetime(value, timezone_name=None):
     if not isinstance(value, str):
         return None
     cleaned = value.strip()
@@ -74,11 +74,14 @@ def _parse_iso_datetime(value):
     candidate = cleaned.replace("Z", "+00:00")
     try:
         parsed = datetime.fromisoformat(candidate)
-        if parsed.tzinfo is None:
-            return None
-        return parsed.astimezone(timezone.utc)
     except ValueError:
         return None
+
+    if parsed.tzinfo is None:
+        tz = _coerce_claim_timezone(timezone_name or get_default_claim_timezone())
+        parsed = parsed.replace(tzinfo=tz)
+
+    return parsed.astimezone(timezone.utc)
 
 
 def _parse_gdelt_seen_date(value):
@@ -147,6 +150,27 @@ def extract_claim_date_constraint(query):
     if not text:
         return {"precision": "unavailable", "value": None, "timezone": None}
 
+    bare_iso_date = re.fullmatch(r"\d{4}-\d{2}-\d{2}", text)
+    if bare_iso_date:
+        date_obj = _parse_date_only(text)
+        if date_obj is not None:
+            return {
+                "precision": "date_only",
+                "value": date_obj,
+                "timezone": get_default_claim_timezone(),
+            }
+
+    bare_iso_timestamp = re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?", text)
+    if bare_iso_timestamp:
+        iso_value = text.replace("Z", "+00:00")
+        parsed = _parse_iso_datetime(iso_value)
+        if parsed is not None:
+            return {
+                "precision": "exact_timestamp",
+                "value": parsed,
+                "timezone": get_default_claim_timezone(),
+            }
+
     patterns = [
         r"claim\s+date\s*[:=]\s*(\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}(:\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?)",
         r"claim\s+made\s+(?:on|at)\s*(\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}(:\d{2})?(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?)",
@@ -190,12 +214,12 @@ def extract_claim_date_constraint(query):
                         time_part = parts[-2] + " " + parts[-1]
                         normalized = " ".join(parts[:-2] + [time_part])
 
-        parsed = _parse_iso_datetime(iso_candidate)
+        parsed = _parse_iso_datetime(iso_candidate, timezone_name=get_default_claim_timezone())
         if parsed is not None:
             return {
                 "precision": "exact_timestamp",
                 "value": parsed,
-                "timezone": "UTC",
+                "timezone": get_default_claim_timezone(),
             }
 
         natural_date = _parse_date_only(value)
@@ -209,14 +233,15 @@ def extract_claim_date_constraint(query):
     return {"precision": "unavailable", "value": None, "timezone": None}
 
 
-def _to_utc_datetime(value):
+def _to_utc_datetime(value, timezone_name=None):
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
+            aware = value.replace(tzinfo=_coerce_claim_timezone(timezone_name or get_default_claim_timezone()))
+            return aware.astimezone(timezone.utc)
         return value.astimezone(timezone.utc)
 
     if isinstance(value, str):
-        parsed = _parse_iso_datetime(value)
+        parsed = _parse_iso_datetime(value, timezone_name=timezone_name or get_default_claim_timezone())
         if parsed is not None:
             return parsed
 
@@ -242,7 +267,7 @@ def get_temporal_cutoff_for_claim(query):
         return None
 
     if precision == "exact_timestamp":
-        return _to_utc_datetime(value)
+        return _to_utc_datetime(value, timezone_name=constraint.get("timezone"))
 
     if precision == "date_only":
         return _date_only_end_of_day(value, constraint.get("timezone"))
@@ -250,7 +275,7 @@ def get_temporal_cutoff_for_claim(query):
     return None
 
 
-def document_is_temporally_eligible(document, claim_datetime=None):
+def document_is_temporally_eligible(document, claim_datetime=None, claim_precision=None):
     """
     Return True when a document's publication timestamp is on or before the claim cutoff.
     Missing/invalid publication timestamps are excluded when filtering is active.
@@ -262,11 +287,20 @@ def document_is_temporally_eligible(document, claim_datetime=None):
     if not isinstance(published, str) or not published.strip():
         return False
 
-    parsed = _parse_iso_datetime(published)
-    if parsed is None:
-        return False
+    document_date = _parse_date_only(published)
+    if document_date is not None:
+        if claim_precision == "exact_timestamp":
+            return False
+        tz_name = get_default_claim_timezone()
+        tz = _coerce_claim_timezone(tz_name)
+        cutoff_day = claim_datetime.astimezone(tz).date()
+        return document_date <= cutoff_day
 
-    return parsed.astimezone(timezone.utc) <= claim_datetime.astimezone(timezone.utc)
+    document_timestamp = _parse_iso_datetime(published)
+    if document_timestamp is not None:
+        return document_timestamp.astimezone(timezone.utc) <= claim_datetime.astimezone(timezone.utc)
+
+    return False
 
 
 def get_claim_date_precision(query):
