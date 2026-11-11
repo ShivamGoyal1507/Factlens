@@ -289,7 +289,7 @@ def create_demo() -> Any:
                     examples=[
                         ["Rahul Gandhi has been chief justice of india in the past."],
                         ["Rahul Gandhi is the leader of opposition."],
-                        ["Jensen Huang cheated on his wife."],
+                        ["narendra modi was chief minister of Gujarat."],
                     ],
                     inputs=claim,
                     label="Try an example",
