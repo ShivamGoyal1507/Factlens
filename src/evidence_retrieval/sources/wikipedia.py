@@ -86,33 +86,19 @@ class WikipediaRateLimited(requests.RequestException):
     """Raised instead of calling the API while Wikipedia is rate-limiting us."""
 
 
-# Wikimedia's etiquette: at most ~3 concurrent requests, stay under the rate
-# limit (200/min for an identified User-Agent) and back off on HTTP 429.
-# Thread-safe: send times are reserved under a lock (one request per
-# _MIN_REQUEST_INTERVAL across all threads), but the HTTP round trip happens
-# outside it, so up to _MAX_IN_FLIGHT requests overlap. Identical requests
-# are answered from an in-process cache, and after a 429 Wikipedia is skipped
+# Wikimedia asks API clients to send requests one at a time and to back off
+# on HTTP 429. Requests are therefore spaced out, identical requests are
+# answered from an in-process cache, and after a 429 Wikipedia is skipped
 # for the Retry-After period instead of being hit again.
 _MIN_REQUEST_INTERVAL = float(os.environ.get("FACTLENS_WIKI_MIN_INTERVAL", "0.35"))
-_MAX_IN_FLIGHT = max(1, int(os.environ.get("FACTLENS_WIKI_MAX_CONCURRENCY", "3")))
 _DEFAULT_COOLDOWN = 60.0
-_CACHE_MAX = 2048
+_CACHE_MAX = 512
 
-_thread_local = threading.local()
+_session = requests.Session()
+_session.headers.update(HEADERS)
 _lock = threading.Lock()
-_in_flight = threading.BoundedSemaphore(_MAX_IN_FLIGHT)
 _state = {"last_request": 0.0, "blocked_until": 0.0}
 _cache = {}
-
-
-def _session():
-    """One HTTP session per thread (requests.Session is not thread-safe)."""
-    session = getattr(_thread_local, "session", None)
-    if session is None:
-        session = requests.Session()
-        session.headers.update(HEADERS)
-        _thread_local.session = session
-    return session
 
 
 def reset_wikipedia_state():
@@ -124,26 +110,6 @@ def reset_wikipedia_state():
 
 def _cooldown_remaining():
     return max(0.0, _state["blocked_until"] - time.time())
-
-
-def _raise_if_cooling_down():
-    remaining = _cooldown_remaining()
-    if remaining:
-        raise WikipediaRateLimited(
-            f"Wikipedia skipped (rate-limited, {int(remaining)}s left)"
-        )
-
-
-def _reserve_send_slot():
-    """Wait for this thread's turn so all threads together respect the rate."""
-    with _lock:
-        _raise_if_cooling_down()
-        slot = max(time.monotonic(), _state["last_request"] + _MIN_REQUEST_INTERVAL)
-        _state["last_request"] = slot
-    delay = slot - time.monotonic()
-    if delay > 0:
-        time.sleep(delay)
-    _raise_if_cooling_down()  # a 429 may have arrived while waiting
 
 
 def _start_cooldown(response):
@@ -165,23 +131,30 @@ def _api_get(params):
     if key in _cache:
         return _cache[key]
 
-    # Take a concurrency slot first, then the send time: reserving the time
-    # first would let requests that waited for a slot go out in a burst.
-    with _in_flight:
-        _reserve_send_slot()
-        response = request_with_retry(
-            WIKIPEDIA_API,
-            params=params,
-            timeout=20,
-            max_retries=0,  # single attempt: no repeated API hits on failure
-            session=_session(),
-        )
-    if response.status_code in (429, 503):
-        with _lock:
-            if not _cooldown_remaining():  # report once, not per thread
-                _start_cooldown(response)
-    response.raise_for_status()
-    data = response.json()
+    with _lock:
+        remaining = _cooldown_remaining()
+        if remaining:
+            raise WikipediaRateLimited(
+                f"Wikipedia skipped (rate-limited, {int(remaining)}s left)"
+            )
+        wait = _state["last_request"] + _MIN_REQUEST_INTERVAL - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            response = request_with_retry(
+                WIKIPEDIA_API,
+                params=params,
+                timeout=20,
+                max_retries=0,  # single attempt: no repeated API hits on failure
+                session=_session,
+            )
+        finally:
+            _state["last_request"] = time.time()
+
+        if response.status_code in (429, 503):
+            _start_cooldown(response)
+        response.raise_for_status()
+        data = response.json()
 
     if len(_cache) >= _CACHE_MAX:
         _cache.clear()
@@ -342,9 +315,6 @@ _VERB_SPLIT = re.compile(
 )
 
 
-_NLP_LOCK = threading.Lock()  # spaCy pipelines are not guaranteed thread-safe
-
-
 @lru_cache(maxsize=1)
 def _default_nlp():
     try:
@@ -364,11 +334,7 @@ def claim_mentions(claim, entities=None, nlp=None):
     claim = (claim or "").strip().rstrip(".")
     mentions = []
     nlp = nlp if nlp is not None else _default_nlp()
-    if nlp is not None:
-        with _NLP_LOCK:
-            doc = nlp(claim)
-    else:
-        doc = None
+    doc = nlp(claim) if nlp is not None else None
 
     subject = _VERB_SPLIT.split(claim, maxsplit=1)[0].strip()
     if subject and subject != claim and len(subject.split()) <= 8:

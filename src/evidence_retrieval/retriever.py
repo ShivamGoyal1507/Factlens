@@ -26,8 +26,7 @@ def safe_retrieve(source_name, search_function, query):
             results = []
 
         normalized_results = normalize_documents(results, source_hint=source_name)
-        if not QUIET:
-            print(f"{source_name}: Retrieved {len(normalized_results)} articles")
+        print(f"{source_name}: Retrieved {len(normalized_results)} articles")
         return normalized_results
 
     except Exception as error:
@@ -126,10 +125,6 @@ def retrieve_evidence(query, claim_made_at=None):
 
     return unique_results
 
-
-# FACTLENS_QUIET=1 silences the per-source success lines (batch evaluation
-# with several threads); failures are still printed.
-QUIET = os.environ.get("FACTLENS_QUIET", "").strip().lower() in {"1", "true", "yes"}
 
 # Set FACTLENS_DISABLE_NEWS=1 to use Wikipedia only (e.g. for FEVER benchmarks,
 # whose claims are about encyclopedic facts).
