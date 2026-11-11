@@ -12,3 +12,5 @@ __pycache__/
 # Temporary files
 =
 .cph/
+
+experiments/classifier/fever-data

@@ -1,0 +1,36 @@
+{
+  "base_model": "microsoft/deberta-v3-base",
+  "method": "LoRA sequence classification",
+  "train_size": 186217,
+  "validation_size": 24242,
+  "train_label_distribution": {
+    "SUPPORTS": 115573,
+    "REFUTES": 42913,
+    "NEI": 27731
+  },
+  "validation_label_distribution": {
+    "NEI": 5285,
+    "SUPPORTS": 9508,
+    "REFUTES": 9449
+  },
+  "max_length": 256,
+  "num_epochs": 4,
+  "train_batch_size": 8,
+  "eval_batch_size": 16,
+  "gradient_accumulation_steps": 1,
+  "warmup_steps": 1000,
+  "transformers_version": "5.22.2",
+  "peft_version": "0.21.2",
+  "lora_r": 16,
+  "lora_alpha": 32,
+  "lora_dropout": 0.1,
+  "lora_target_modules": [
+    "query_proj",
+    "value_proj"
+  ],
+  "training_seconds": 16963.476542949677,
+  "validation_accuracy": 0.9667519181585678,
+  "validation_macro_f1": 0.9694489217901804,
+  "validation_weighted_f1": 0.966786168100575,
+  "best_checkpoint": "/kaggle/working/fever_deberta_lora_final/checkpoints/checkpoint-34917"
+}
