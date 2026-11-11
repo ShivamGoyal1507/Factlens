@@ -21,7 +21,7 @@ class BM25Ranker:
     def fit(self, passages):
         self.passages = list(passages)
         self.tokenized_passages = [
-            self.tokenize(passage.get("text", ""))
+            self.tokenize(passage.get("rank_text") or passage.get("text", ""))
             for passage in self.passages
         ]
 

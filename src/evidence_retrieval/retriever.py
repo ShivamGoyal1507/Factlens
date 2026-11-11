@@ -1,7 +1,9 @@
 import os
 
-from src.evidence_retrieval.sources.wikipedia import search_wikipedia
-from src.evidence_retrieval.sources.gdelt import search_gdelt
+from src.evidence_retrieval.sources.wikipedia import (
+    search_wikipedia,
+    search_wikipedia_for_claim,
+)
 from src.evidence_retrieval.sources.newsapi import search_newsapi
 from src.evidence_retrieval.utils.normalizer import normalize_documents
 from src.evidence_retrieval.utils.deduplication import remove_duplicates as _remove_duplicates
@@ -70,7 +72,7 @@ def filter_by_claim_date(documents, query=None, claim_made_at=None):
 
 def retrieve_evidence(query, claim_made_at=None):
     """
-    Retrieve evidence from Wikipedia, GDELT and NewsAPI.
+    Retrieve evidence from Wikipedia and NewsAPI.
 
     Args:
         query (str): Search query.
@@ -85,10 +87,11 @@ def retrieve_evidence(query, claim_made_at=None):
         return []
 
     wikipedia_results = safe_retrieve("Wikipedia", search_wikipedia, query)
-    gdelt_results = safe_retrieve("GDELT", search_gdelt, query)
-    newsapi_results = safe_retrieve("NewsAPI", search_newsapi, query)
+    newsapi_results = (
+        safe_retrieve("NewsAPI", search_newsapi, query) if NEWS_ENABLED else []
+    )
 
-    all_results = wikipedia_results + gdelt_results + newsapi_results
+    all_results = wikipedia_results + newsapi_results
     valid_results = validate_documents(all_results)
     unique_results = remove_duplicates(valid_results)
 
@@ -114,7 +117,6 @@ def retrieve_evidence(query, claim_made_at=None):
 
     print("\n===== EVIDENCE RETRIEVAL SUMMARY =====")
     print("Wikipedia:", len(wikipedia_results))
-    print("GDELT:", len(gdelt_results))
     print("NewsAPI:", len(newsapi_results))
     print("Total before deduplication:", len(all_results))
     print("Total after deduplication:", len(unique_results))
@@ -124,34 +126,39 @@ def retrieve_evidence(query, claim_made_at=None):
     return unique_results
 
 
-# GDELT allows one request per 5 s per IP, so only the first few queries of
-# a claim are sent to it (the rest use Wikipedia and NewsAPI only).
-GDELT_MAX_QUERIES_PER_CLAIM = int(os.environ.get("FACTLENS_GDELT_MAX_QUERIES", "2"))
+# Set FACTLENS_DISABLE_NEWS=1 to use Wikipedia only (e.g. for FEVER benchmarks,
+# whose claims are about encyclopedic facts).
+NEWS_ENABLED = os.environ.get("FACTLENS_DISABLE_NEWS", "").strip().lower() not in {
+    "1", "true", "yes",
+}
 
 
-def _retrieve_evidence_for_single_query(query, include_gdelt=True):
+def _retrieve_evidence_for_single_query(query):
     """Internal helper for source retrieval, validation, and deduplication."""
     if not isinstance(query, str) or not query.strip():
         print("Invalid query. Please provide a non-empty search query.")
         return []
 
     wikipedia_results = safe_retrieve("Wikipedia", search_wikipedia, query)
-    gdelt_results = (
-        safe_retrieve("GDELT", search_gdelt, query) if include_gdelt else []
+    newsapi_results = (
+        safe_retrieve("NewsAPI", search_newsapi, query) if NEWS_ENABLED else []
     )
-    newsapi_results = safe_retrieve("NewsAPI", search_newsapi, query)
 
-    all_results = wikipedia_results + gdelt_results + newsapi_results
+    all_results = wikipedia_results + newsapi_results
     valid_results = validate_documents(all_results)
     unique_results = remove_duplicates(valid_results)
 
     return unique_results
 
 
-def retrieve_evidence_for_claim(claim, queries=None, claim_made_at=None):
+def retrieve_evidence_for_claim(claim, queries=None, claim_made_at=None, entities=None):
     """
     Retrieve evidence for a claim using multiple generated subqueries while
     preserving the original claim-made date as the sole temporal cutoff.
+
+    Wikipedia pages the claim is about (title mentioned in the claim) are
+    retrieved first from the claim itself, independent of the generated
+    queries; that is where FEVER-style gold evidence lives.
     """
     if not isinstance(claim, str) or not claim.strip():
         return []
@@ -163,13 +170,13 @@ def retrieve_evidence_for_claim(claim, queries=None, claim_made_at=None):
     if not isinstance(queries, list) or not queries:
         return []
 
-    all_documents = []
-    for index, query in enumerate(queries):
-        documents = _retrieve_evidence_for_single_query(
-            query,
-            include_gdelt=index < GDELT_MAX_QUERIES_PER_CLAIM,
-        )
-        all_documents.extend(documents)
+    all_documents = validate_documents(safe_retrieve(
+        "Wikipedia (claim pages)",
+        lambda _query: search_wikipedia_for_claim(claim, entities=entities),
+        claim,
+    ))
+    for query in queries:
+        all_documents.extend(_retrieve_evidence_for_single_query(query))
 
     deduplicated = remove_duplicates(all_documents)
 
@@ -293,19 +300,6 @@ def prepare_for_ranking(documents):
 
         text = doc.get("text", "")
         title = doc.get("title")
-        text_from_title = False
-
-        # GDELT returns headlines only (no article body). Use the headline as
-        # the passage text so GDELT results can be ranked and verified instead
-        # of being silently dropped.
-        if (
-            (not isinstance(text, str) or not text.strip())
-            and doc.get("source") == "GDELT"
-            and isinstance(title, str)
-            and title.strip()
-        ):
-            text = title.strip()
-            text_from_title = True
 
         if not isinstance(text, str) or not text.strip():
             continue
@@ -322,7 +316,6 @@ def prepare_for_ranking(documents):
 
         prepared = dict(doc)
         prepared["text"] = text
-        prepared["text_from_title"] = text_from_title
         prepared["published_date"] = doc.get("date")
         ranking_ready.append(prepared)
 

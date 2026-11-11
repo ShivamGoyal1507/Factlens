@@ -36,7 +36,7 @@ class CrossEncoderReranker:
             return []
 
         pairs = [
-            (claim, candidate["text"])
+            (claim, candidate.get("rank_text") or candidate["text"])
             for candidate in valid_candidates
         ]
 
@@ -95,7 +95,7 @@ class CrossEncoderReranker:
             return []
 
         pairs = [
-            (text, candidate["text"])
+            (text, candidate.get("rank_text") or candidate["text"])
             for candidate in valid_candidates
             for text in texts
         ]

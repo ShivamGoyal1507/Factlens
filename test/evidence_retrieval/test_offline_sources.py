@@ -4,7 +4,6 @@ from unittest.mock import Mock
 from datetime import datetime, timezone
 
 from src.evidence_retrieval.sources.wikipedia import search_wikipedia
-from src.evidence_retrieval.sources.gdelt import search_gdelt
 from src.evidence_retrieval.sources.newsapi import search_newsapi
 from src.evidence_retrieval.retriever import (
     validate_documents,
@@ -65,31 +64,6 @@ def test_wikipedia_success(monkeypatch):
     assert "Artificial intelligence" in results[0]["text"]
 
 
-def test_gdelt_success(monkeypatch):
-    payload = {
-        "articles": [
-            {
-                "title": "AI growth",
-                "url": "https://example.com/ai",
-                "seendate": "20240101T120000Z",
-            }
-        ]
-    }
-
-    def fake_get(url, params=None, headers=None, timeout=None, max_retries=None, status_codes_to_retry=None, session=None, **kwargs):
-        return _mock_response(200, payload)
-
-    monkeypatch.setattr("src.evidence_retrieval.http_retry.requests.get", fake_get)
-    monkeypatch.setattr("src.evidence_retrieval.sources.gdelt.request_with_retry", lambda *args, **kwargs: fake_get(*args, **kwargs))
-
-    results = search_gdelt("AI", limit=5)
-    assert len(results) == 1
-    assert results[0]["source"] == "GDELT"
-    assert results[0]["seen_date"] == "20240101T120000Z"
-    assert results[0]["date"] is None
-    assert results[0]["text"] == ""
-
-
 def test_newsapi_success(monkeypatch):
     payload = {
         "articles": [
@@ -139,7 +113,8 @@ def test_timeout_is_handled(monkeypatch):
     assert search_wikipedia("AI") == []
 
 
-def test_http_error_retry_behavior(monkeypatch):
+def test_http_error_is_not_retried(monkeypatch):
+    """A failing source is hit once and returns no results (no retries)."""
     calls = {"count": 0}
 
     def fake_get(url, params=None, headers=None, timeout=None, max_retries=None, status_codes_to_retry=None, session=None, **kwargs):
@@ -156,31 +131,7 @@ def test_http_error_retry_behavior(monkeypatch):
 
     results = search_newsapi("AI")
     assert results == []
-    assert calls["count"] >= 3
-
-
-def test_metadata_only_gdelt_document_is_kept(monkeypatch):
-    payload = {
-        "articles": [
-            {
-                "title": "GDELT metadata only",
-                "url": "https://example.com/gdelt",
-                "seendate": "20240101T120000Z",
-            }
-        ]
-    }
-
-    def fake_get(url, params=None, headers=None, timeout=None, max_retries=None, status_codes_to_retry=None, session=None, **kwargs):
-        return _mock_response(200, payload)
-
-    monkeypatch.setattr("src.evidence_retrieval.http_retry.requests.get", fake_get)
-    monkeypatch.setattr("src.evidence_retrieval.sources.gdelt.request_with_retry", lambda *args, **kwargs: fake_get(*args, **kwargs))
-
-    results = search_gdelt("AI")
-    assert len(results) == 1
-    assert results[0]["text"] == ""
-    assert results[0]["seen_date"] == "20240101T120000Z"
-    assert results[0]["date"] is None
+    assert calls["count"] == 1
 
 
 def test_validation_and_deduplication():

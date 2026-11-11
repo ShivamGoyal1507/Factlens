@@ -2,8 +2,9 @@
 
 Pipeline:
     claim -> query generation (Qwen2.5-1.5B-Instruct)
-          -> evidence retrieval for every query (Wikipedia, GDELT, NewsAPI)
-          -> passage ranking (BM25 + dense -> RRF -> cross-encoder)
+          -> evidence retrieval for every query (Wikipedia, NewsAPI)
+          -> sentence ranking (BM25 + dense -> RRF -> cross-encoder
+             -> entity / claim-page priors -> verifier relevance)
           -> evidence selection
           -> verification (DeBERTa LoRA, per passage, then aggregated)
           -> explanation (reuses the Qwen2.5-1.5B-Instruct query model)
@@ -24,6 +25,7 @@ import torch  # noqa: E402,F401
 
 import argparse  # noqa: E402
 import json  # noqa: E402
+from functools import lru_cache  # noqa: E402
 from typing import Any  # noqa: E402
 
 from src.classifier.verifier import ClaimVerifier  # noqa: E402
@@ -32,77 +34,57 @@ from src.evidence_retrieval.retriever import (  # noqa: E402
     retrieve_evidence_for_claim,
 )
 from src.query_generation import generate_search_plan, normalize_claim  # noqa: E402
+from src.query_generation.generator import _extract_named_entities  # noqa: E402
 
 
-def run_pipeline(
-    claim: str,
+# Models are loaded once per process (batch evaluation calls run_pipeline
+# many times; reloading DeBERTa and the encoders per claim dominated runtime).
+@lru_cache(maxsize=None)
+def _dense_model(name: str):
+    from src.ranking.dense_ranker import DenseRanker
+
+    return DenseRanker(model_name=name)
+
+
+@lru_cache(maxsize=None)
+def _cross_encoder(name: str):
+    from src.ranking.cross_encoder_reranker import CrossEncoderReranker
+
+    return CrossEncoderReranker(model_name=name)
+
+
+@lru_cache(maxsize=1)
+def _verifier() -> ClaimVerifier:
+    return ClaimVerifier()
+
+
+def rank_evidence(
+    normalized_claim: str,
+    queries: list[str],
+    entities: list[str],
+    ranking_documents: list[dict[str, Any]],
     *,
     passage_sentences: int = 3,
     passage_overlap: int = 1,
-    bm25_top_k: int = 20,
-    dense_top_k: int = 20,
-    merged_top_k: int = 40,
-    reranked_top_k: int = 20,
+    bm25_top_k: int = 30,
+    dense_top_k: int = 30,
+    merged_top_k: int = 60,
+    reranked_top_k: int = 30,
     evidence_top_k: int = 5,
     max_evidence_per_source: int | None = 10,
     dense_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
     cross_encoder_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
-    include_explanation: bool = True,
-    use_query_generation: bool = True,
-    claim_made_at: str | None = None,
+    verifier_rerank_weight: float = 5.0,
+    verifier_rerank_pool: int = 30,
 ) -> dict[str, Any]:
-    """Run query generation, retrieval, ranking, verification and explanation."""
-    if not isinstance(claim, str) or not claim.strip():
-        raise ValueError("claim must be a non-empty string")
-    if evidence_top_k < 1:
-        raise ValueError("evidence_top_k must be positive")
-    if max_evidence_per_source is not None and max_evidence_per_source < 1:
-        raise ValueError(
-            "max_evidence_per_source must be positive or None"
-        )
-
+    """Split retrieved documents into passages, rank them and select evidence."""
     from src.ranking.bm25_ranker import BM25Ranker
     from src.ranking.candidate_merger import CandidateMerger
-    from src.ranking.cross_encoder_reranker import CrossEncoderReranker
-    from src.ranking.dense_ranker import DenseRanker
+    from src.ranking.claim_page_scorer import ClaimPageScorer
     from src.ranking.entity_scorer import EntityScorer
     from src.ranking.evidence_selector import EvidenceSelector
     from src.ranking.passage_splitter import PassageSplitter
-
-    claim = claim.strip()
-
-    # 1. Query generation: neutral + claim-specific queries, entity queries,
-    #    and the claim's named entities (used later for entity-aware ranking).
-    #    Falls back to the raw claim if generation is disabled or yields nothing.
-    plan = (
-        generate_search_plan(claim)
-        if use_query_generation
-        else {"queries": [], "entities": []}
-    )
-    queries = plan["queries"] or [claim]
-    entities = plan["entities"]
-    print("\n===== GENERATED QUERIES =====")
-    for index, query in enumerate(queries, 1):
-        print(f"{index}. {query}")
-    print("Entities:", ", ".join(entities) if entities else "(none)")
-
-    # The verifier was trained on FEVER claims (proper capitalisation, final
-    # period) and is case-sensitive, so normalise the claim for ranking,
-    # verification and explanation.
-    normalized_claim = normalize_claim(claim, entities)
-    print("Normalized claim:", normalized_claim)
-
-    # 2. Evidence retrieval for every query, merged and de-duplicated.
-    retrieved_documents = retrieve_evidence_for_claim(
-        claim,
-        queries=queries,
-        claim_made_at=claim_made_at,
-    )
-    ranking_documents = prepare_for_ranking(retrieved_documents)
-    if not ranking_documents:
-        raise RuntimeError(
-            "Evidence retrieval returned no documents with usable text."
-        )
+    from src.ranking.verifier_reranker import VerifierReranker
 
     splitter = PassageSplitter(
         sentences_per_passage=passage_sentences,
@@ -123,7 +105,7 @@ def run_pipeline(
     ranking_texts = list(dict.fromkeys([normalized_claim] + ranking_queries))
 
     bm25_ranker = BM25Ranker().fit(passages)
-    dense_ranker = DenseRanker(model_name=dense_model_name).fit(passages)
+    dense_ranker = _dense_model(dense_model_name).fit(passages)
 
     rankings = []
     for index, text in enumerate(ranking_texts):
@@ -144,15 +126,22 @@ def run_pipeline(
     # Cross-encoder: best score over claim + queries for every merged
     # candidate, then entity-aware adjustment (boost passages about the
     # claim's entities, penalise namesakes such as Rajiv Gandhi for a Rahul
-    # Gandhi claim), then keep the top candidates.
-    cross_encoded = CrossEncoderReranker(
-        model_name=cross_encoder_model_name,
-    ).rerank_multi(
+    # Gandhi claim), then a prior for sentences on pages the claim names
+    # (where FEVER evidence lives), then the verifier's own judgement of
+    # whether each top sentence settles the claim (1 - P(NEI)).
+    cross_encoded = _cross_encoder(cross_encoder_model_name).rerank_multi(
         ranking_texts,
         merged_results,
         top_k=len(merged_results),
     )
-    reranked_results = EntityScorer().score(cross_encoded, entities)[:reranked_top_k]
+    entity_scored = EntityScorer().score(cross_encoded, entities)
+    page_scored = ClaimPageScorer().score(entity_scored, normalized_claim)
+    verifier = _verifier()
+    reranked_results = VerifierReranker(
+        verifier,
+        weight=verifier_rerank_weight,
+        pool_size=verifier_rerank_pool,
+    ).rerank(normalized_claim, page_scored)[:reranked_top_k]
     if not reranked_results:
         raise RuntimeError("The reranker produced no valid candidates.")
 
@@ -168,10 +157,119 @@ def run_pipeline(
     if not final_evidence:
         raise RuntimeError("Evidence selection produced no usable evidence.")
 
+    return {
+        "passages": passages,
+        "bm25_results": bm25_results,
+        "dense_results": dense_results,
+        "merged_results": merged_results,
+        "reranked_results": reranked_results,
+        "final_evidence": final_evidence,
+    }
+
+
+def run_pipeline(
+    claim: str,
+    *,
+    passage_sentences: int = 3,
+    passage_overlap: int = 1,
+    bm25_top_k: int = 30,
+    dense_top_k: int = 30,
+    merged_top_k: int = 60,
+    reranked_top_k: int = 30,
+    evidence_top_k: int = 5,
+    max_evidence_per_source: int | None = 10,
+    dense_model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+    cross_encoder_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    include_explanation: bool = True,
+    use_query_generation: bool = True,
+    claim_made_at: str | None = None,
+    verifier_rerank_weight: float = 5.0,
+    verifier_rerank_pool: int = 30,
+) -> dict[str, Any]:
+    """Run query generation, retrieval, ranking, verification and explanation."""
+    if not isinstance(claim, str) or not claim.strip():
+        raise ValueError("claim must be a non-empty string")
+    if evidence_top_k < 1:
+        raise ValueError("evidence_top_k must be positive")
+    if max_evidence_per_source is not None and max_evidence_per_source < 1:
+        raise ValueError(
+            "max_evidence_per_source must be positive or None"
+        )
+
+    claim = claim.strip()
+
+    # 1. Query generation: neutral + claim-specific queries, entity queries,
+    #    and the claim's named entities (used later for entity-aware ranking).
+    #    Falls back to the raw claim (and capitalised spans as entities) if
+    #    generation is disabled or yields nothing.
+    plan = (
+        generate_search_plan(claim)
+        if use_query_generation
+        else {"queries": [], "entities": []}
+    )
+    queries = plan["queries"] or [claim]
+    entities = plan["entities"] or _extract_named_entities(claim)
+    print("\n===== GENERATED QUERIES =====")
+    for index, query in enumerate(queries, 1):
+        print(f"{index}. {query}")
+    print("Entities:", ", ".join(entities) if entities else "(none)")
+
+    # The verifier was trained on FEVER claims (proper capitalisation, final
+    # period) and is case-sensitive, so normalise the claim for ranking,
+    # verification and explanation.
+    normalized_claim = normalize_claim(claim, entities)
+    print("Normalized claim:", normalized_claim)
+
+    # 2. Evidence retrieval: the Wikipedia pages the claim mentions, then
+    #    every query; merged and de-duplicated.
+    retrieved_documents = retrieve_evidence_for_claim(
+        normalized_claim,
+        queries=queries,
+        claim_made_at=claim_made_at,
+        entities=entities,
+    )
+    ranking_documents = prepare_for_ranking(retrieved_documents)
+    if not ranking_documents:
+        # Every source failed or was rate-limited: without evidence the only
+        # honest verdict is NEI, so report that instead of crashing.
+        print(
+            "\nNo evidence could be retrieved (all sources failed or were "
+            "rate-limited). Returning NEI."
+        )
+        return _no_evidence_result(
+            claim, normalized_claim, queries, entities, len(retrieved_documents)
+        )
+
+    ranked = rank_evidence(
+        normalized_claim,
+        queries,
+        entities,
+        ranking_documents,
+        passage_sentences=passage_sentences,
+        passage_overlap=passage_overlap,
+        bm25_top_k=bm25_top_k,
+        dense_top_k=dense_top_k,
+        merged_top_k=merged_top_k,
+        reranked_top_k=reranked_top_k,
+        evidence_top_k=evidence_top_k,
+        max_evidence_per_source=max_evidence_per_source,
+        dense_model_name=dense_model_name,
+        cross_encoder_model_name=cross_encoder_model_name,
+        verifier_rerank_weight=verifier_rerank_weight,
+        verifier_rerank_pool=verifier_rerank_pool,
+    )
+    passages = ranked["passages"]
+    bm25_results = ranked["bm25_results"]
+    dense_results = ranked["dense_results"]
+    merged_results = ranked["merged_results"]
+    reranked_results = ranked["reranked_results"]
+    final_evidence = ranked["final_evidence"]
+    verifier = _verifier()
+
     # 4. Verification: claim vs. each passage separately (as the FEVER model
     #    was trained), then aggregated. Concatenating all passages truncates
     #    at 256 tokens and hides the decisive passage.
-    verification = ClaimVerifier().verify_evidence(
+    verification = verifier.verify_evidence(
         normalized_claim,
         [item["text"] for item in final_evidence],
     )
@@ -209,6 +307,9 @@ def run_pipeline(
         "queries": queries,
         "entities": entities,
         "evidence": final_evidence,
+        "retrieved_titles": list(dict.fromkeys(
+            doc.get("title", "") for doc in ranking_documents
+        )),
         "verification": verification,
         "explanation": explanation,
         "counts": {
@@ -222,6 +323,46 @@ def run_pipeline(
             "reranked_candidates": len(reranked_results),
             "selected_evidence": len(final_evidence),
             "explanation_generated": explanation is not None,
+        },
+    }
+
+
+def _no_evidence_result(
+    claim: str,
+    normalized_claim: str,
+    queries: list[str],
+    entities: list[str],
+    retrieved_count: int,
+) -> dict[str, Any]:
+    """Pipeline result when retrieval produced no usable evidence."""
+    return {
+        "claim": claim,
+        "normalized_claim": normalized_claim,
+        "queries": queries,
+        "entities": entities,
+        "evidence": [],
+        "retrieved_titles": [],
+        "verification": {
+            "claim": normalized_claim,
+            "verdict": "NEI",
+            "confidence": 1.0,
+            "probabilities": {"SUPPORTS": 0.0, "REFUTES": 0.0, "NEI": 1.0},
+            "decisive_evidence": [],
+            "per_evidence": [],
+            "reason": "no_evidence_retrieved",
+        },
+        "explanation": (
+            "No evidence could be retrieved for this claim (the evidence "
+            "sources failed or rate-limited the request), so it cannot be "
+            "verified. Try again in a few minutes."
+        ),
+        "counts": {
+            "queries": len(queries),
+            "retrieved_documents": retrieved_count,
+            "ranking_documents": 0,
+            "passages": 0,
+            "selected_evidence": 0,
+            "explanation_generated": False,
         },
     }
 

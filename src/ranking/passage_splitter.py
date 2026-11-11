@@ -1,6 +1,13 @@
 import hashlib
 import re
+from functools import lru_cache
+
 import spacy
+
+
+@lru_cache(maxsize=1)
+def _load_spacy():
+    return spacy.load("en_core_web_sm")
 
 
 class PassageSplitter:
@@ -16,7 +23,7 @@ class PassageSplitter:
         self.sentences_per_passage = sentences_per_passage
         self.overlap = overlap
         self.step = sentences_per_passage - overlap
-        self.nlp = spacy.load("en_core_web_sm")
+        self.nlp = _load_spacy()
 
     def split_sentences(self, text):
         text = re.sub(r"\s+", " ", text).strip()
@@ -56,9 +63,21 @@ class PassageSplitter:
                 f"{source_url}|{passage_text}".encode("utf-8")
             ).hexdigest()[:16]
 
+            title = article.get("title", "") or ""
+            # Rankers see "Title: sentence" so sentences that refer to the
+            # page subject by pronoun ("He was born in ...") stay matchable.
+            # The verifier still gets the plain sentence ("text"), the
+            # format it was trained on.
+            rank_text = (
+                f"{title}: {passage_text}"
+                if title and not passage_text.lower().startswith(title.lower())
+                else passage_text
+            )
+
             passages.append({
                 "passage_id": passage_id,
                 "text": passage_text,
+                "rank_text": rank_text,
                 "title": article.get("title", ""),
                 "url": source_url,
                 "source": article.get("source", ""),

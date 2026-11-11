@@ -20,12 +20,10 @@ class DenseRanker:
     def fit(self, passages):
         self.passages = list(passages)
 
-        texts = [
-            passage.get("text", "")
-            if isinstance(passage.get("text", ""), str)
-            else ""
-            for passage in self.passages
-        ]
+        texts = []
+        for passage in self.passages:
+            text = passage.get("rank_text") or passage.get("text", "")
+            texts.append(text if isinstance(text, str) else "")
 
         if not texts:
             self.embeddings = np.empty((0, 0), dtype=np.float32)

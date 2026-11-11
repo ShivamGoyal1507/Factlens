@@ -9,7 +9,6 @@ Within this project, the Evidence Retrieval layer is intentionally scoped to ret
 The module retrieves from three sources:
 
 - Wikipedia
-- GDELT
 - NewsAPI
 
 It returns a normalized list of documents that can then be passed to downstream FACTLENS components, including the ranking pipeline.
@@ -39,9 +38,6 @@ Query-level claim-date extraction
         |
         v
 Wikipedia retrieval
-        |
-        v
-GDELT retrieval
         |
         v
 NewsAPI retrieval
@@ -88,27 +84,7 @@ Important:
 - `date` is not populated from revision metadata.
 - When claim-date filtering is active, Wikipedia documents without a real publication timestamp are excluded.
 
-### 4.2 GDELT
-
-The implementation calls the GDELT DOC API and reads each article record.
-
-It keeps:
-
-- `title`
-- `url`
-- `source` = `GDELT`
-- `date` = `None` unless a real publication timestamp is available
-- `seen_date` = the GDELT `seendate` value, when present
-- `text` = empty string by default for metadata-only GDELT records
-
-Important:
-
-- `seendate` is a GDELT observation timestamp, not an article publication date.
-- It is kept in `seen_date`, not `date`.
-- If no reliable publication timestamp is available, `date` remains `None`.
-- Under claim-date filtering, documents without a valid publication timestamp are excluded.
-
-### 4.3 NewsAPI
+### 4.2 NewsAPI
 
 The implementation calls NewsAPI’s `/v2/everything` endpoint and keeps:
 
@@ -144,7 +120,7 @@ Field meanings:
 
 - `title`: article or document title
 - `url`: original document URL
-- `source`: source name (`Wikipedia`, `GDELT`, `NewsAPI`)
+- `source`: source name (`Wikipedia`, `NewsAPI`)
 - `date`: verified publication timestamp when available
 - `seen_date`: observation timestamp from a source when it is relevant and separate from publication time
 - `text`: article text or extracted content, which may be empty for metadata-only records
@@ -230,7 +206,7 @@ When claim-date filtering is active:
 - missing publication timestamps are excluded
 - invalid publication timestamps are excluded
 - `None` publication dates are not replaced with `seen_date`
-- `date` is never inferred from GDELT `seendate`
+- `date` is never inferred from `seen_date`
 - `date` is never inferred from Wikipedia revision metadata
 
 If no claim-date constraint is extracted, the system preserves its normal retrieval behavior without temporal filtering.
@@ -306,7 +282,6 @@ Factlens/
 │   │   ├── sources/
 │   │   │   ├── __init__.py
 │   │   │   ├── wikipedia.py
-│   │   │   ├── gdelt.py
 │   │   │   └── newsapi.py
 │   │   └── utils/
 │   │       ├── __init__.py
@@ -325,7 +300,6 @@ Factlens/
     └── evidence_retrieval/
         ├── test_retriever.py
         ├── test_wikipedia.py
-        ├── test_gdelt.py
         ├── test_newsapi.py
         ├── test_offline_sources.py
 ```
@@ -404,7 +378,7 @@ The existing offline tests cover:
 - exact timestamp filtering
 - date-only filtering
 - missing and invalid timestamp behavior
-- GDELT `seen_date` separation
+- `seen_date` separation
 - Wikipedia revision timestamp handling
 - NewsAPI publication timestamp handling
 - downstream `prepare_for_ranking()` compatibility
@@ -413,7 +387,6 @@ The existing offline tests cover:
 
 - Claim-date filtering only activates when a clear claim time or date is extracted from the query.
 - Date-only filtering is intentionally coarse and should not be treated as exact per-minute chronology.
-- GDELT `seendate` only reflects observation time.
 - Wikipedia article metadata is not treated as original publication time.
 - NewsAPI `publishedAt` is used only when the API supplies it.
 - Retrieval quality depends on the query and on the availability of source data.

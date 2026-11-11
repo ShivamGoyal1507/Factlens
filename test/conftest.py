@@ -33,16 +33,16 @@ def mocker():
 
 
 @pytest.fixture(autouse=True)
-def _reset_gdelt_rate_limiter():
-    """Keep GDELT's 5-second rate limiter from slowing down or leaking between tests."""
-    from src.evidence_retrieval.sources import gdelt
+def _reset_wikipedia_and_newsapi_state():
+    """Wikipedia's response cache / 429 cooldown and NewsAPI's quota flag are
+    process-wide; reset them so mocked responses never leak between tests."""
+    from src.evidence_retrieval.sources import newsapi, wikipedia
 
-    original_interval = gdelt.MIN_INTERVAL_SECONDS
-    original_state_file = gdelt.STATE_FILE
-    gdelt.STATE_FILE = None  # never read/write the real ~/.cache state in tests
-    gdelt.MIN_INTERVAL_SECONDS = 0.0
-    gdelt.reset_rate_limiter()
+    original_interval = wikipedia._MIN_REQUEST_INTERVAL
+    wikipedia._MIN_REQUEST_INTERVAL = 0.0
+    wikipedia.reset_wikipedia_state()
+    newsapi.reset_newsapi_quota_flag()
     yield
-    gdelt.reset_rate_limiter()
-    gdelt.MIN_INTERVAL_SECONDS = original_interval
-    gdelt.STATE_FILE = original_state_file
+    wikipedia.reset_wikipedia_state()
+    newsapi.reset_newsapi_quota_flag()
+    wikipedia._MIN_REQUEST_INTERVAL = original_interval
