@@ -14,3 +14,4 @@ __pycache__/
 .cph/
 
 experiments/classifier/fever-data
+experiments/classifier/output/fever-deberta-v3-base
