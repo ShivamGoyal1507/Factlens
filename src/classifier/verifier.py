@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+import shutil
+import tempfile
 from typing import Any
 
 from .config import (
@@ -37,6 +39,7 @@ class ClaimVerifier:
         self.device_name = device or DEVICE
         self.batch_size = batch_size
         self.model_dir = self._resolve_model_dir(model_dir)
+        self._staging_dir: Path | None = None
         self._torch, auto_tokenizer, auto_model, peft_model = (
             self._import_inference_dependencies()
         )
@@ -57,15 +60,54 @@ class ClaimVerifier:
                 str(self.model_dir),
                 is_trainable=False,
             )
-            self.model.to(self.torch.device(self.device_name))
+            self.model.to(self._torch.device(self.device_name))
             self.model.eval()
         except (OSError, RuntimeError, ValueError) as error:
-            raise RuntimeError(
-                "Could not load the FEVER base model, tokenizer, or trained "
-                f"LoRA adapter from '{self.model_dir}': {error}"
-            ) from error
+            if not self._is_mmap_filesystem_error(error):
+                raise RuntimeError(
+                    "Could not load the FEVER base model, tokenizer, or trained "
+                    f"LoRA adapter from '{self.model_dir}': {error}"
+                ) from error
+
+            try:
+                staged_base_dir, staged_adapter_dir = (
+                    self._stage_local_model_files(base_model_source)
+                )
+                base_model = auto_model.from_pretrained(str(staged_base_dir))
+                self.model = peft_model.from_pretrained(
+                    base_model,
+                    str(staged_adapter_dir),
+                    is_trainable=False,
+                )
+                self.model.to(self._torch.device(self.device_name))
+                self.model.eval()
+            except (OSError, RuntimeError, ValueError) as retry_error:
+                raise RuntimeError(
+                    "Could not load the FEVER model after staging its files "
+                    f"on a local filesystem: {retry_error}"
+                ) from retry_error
 
         self._validate_model_output()
+
+    @staticmethod
+    def _is_mmap_filesystem_error(error: BaseException) -> bool:
+        message = str(error).lower()
+        return "unable to mmap" in message and "operation not supported" in message
+
+    def _stage_local_model_files(
+        self, base_model_source: Path | str
+    ) -> tuple[Path, Path]:
+        if not isinstance(base_model_source, Path) or not base_model_source.is_dir():
+            raise RuntimeError(
+                "The local base model is unavailable for filesystem staging."
+            )
+
+        self._staging_dir = Path(tempfile.mkdtemp(prefix="factlens-model-"))
+        staged_base_dir = self._staging_dir / "base-model"
+        staged_adapter_dir = self._staging_dir / "adapter"
+        shutil.copytree(base_model_source, staged_base_dir)
+        shutil.copytree(self.model_dir, staged_adapter_dir)
+        return staged_base_dir, staged_adapter_dir
 
     @staticmethod
     def _import_inference_dependencies() -> tuple[Any, Any, Any, Any]:
@@ -206,13 +248,13 @@ class ClaimVerifier:
             return_tensors="pt",
         )
         encoded = {
-            key: value.to(self.torch.device(self.device_name))
+            key: value.to(self._torch.device(self.device_name))
             for key, value in encoded.items()
         }
 
-        with self.torch.inference_mode():
+        with self._torch.inference_mode():
             logits = self.model(**encoded).logits
-            probabilities = self.torch.softmax(logits, dim=-1).cpu().tolist()
+            probabilities = self._torch.softmax(logits, dim=-1).cpu().tolist()
 
         results = []
         for (claim, _), row in zip(inputs, probabilities):

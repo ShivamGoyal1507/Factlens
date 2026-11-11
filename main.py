@@ -11,12 +11,6 @@ import json
 import os
 from typing import Any
 
-from src.classifier.verifier import ClaimVerifier
-from src.evidence_retrieval.retriever import (
-    prepare_for_ranking,
-    retrieve_evidence,
-)
-
 
 def run_pipeline(
     claim: str,
@@ -47,12 +41,26 @@ def run_pipeline(
     # PyTorch and the sentence-transformers stack.
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 
-    from src.ranking.bm25_ranker import BM25Ranker
-    from src.ranking.candidate_merger import CandidateMerger
-    from src.ranking.cross_encoder_reranker import CrossEncoderReranker
-    from src.ranking.dense_ranker import DenseRanker
-    from src.ranking.evidence_selector import EvidenceSelector
-    from src.ranking.passage_splitter import PassageSplitter
+    try:
+        from src.classifier.verifier import ClaimVerifier
+        from src.evidence_retrieval.retriever import (
+            prepare_for_ranking,
+            retrieve_evidence,
+        )
+        from src.ranking.bm25_ranker import BM25Ranker
+        from src.ranking.candidate_merger import CandidateMerger
+        from src.ranking.cross_encoder_reranker import CrossEncoderReranker
+        from src.ranking.dense_ranker import DenseRanker
+        from src.ranking.evidence_selector import EvidenceSelector
+        from src.ranking.passage_splitter import PassageSplitter
+    except ModuleNotFoundError as error:
+        missing_module = error.name or "a required module"
+        raise RuntimeError(
+            f"FACTLENS cannot start because '{missing_module}' is not "
+            "installed. Activate the target environment and run "
+            "'python -m pip install -r requirements.txt', then install the "
+            "spaCy model with 'python -m spacy download en_core_web_sm'."
+        ) from error
 
     retrieved_documents = retrieve_evidence(claim.strip())
     ranking_documents = prepare_for_ranking(retrieved_documents)
