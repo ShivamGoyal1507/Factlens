@@ -64,7 +64,7 @@ def rank_evidence(
     entities: list[str],
     ranking_documents: list[dict[str, Any]],
     *,
-    passage_sentences: int = 3,
+    passage_sentences: int = 2,
     passage_overlap: int = 1,
     bm25_top_k: int = 30,
     dense_top_k: int = 30,
@@ -170,7 +170,7 @@ def rank_evidence(
 def run_pipeline(
     claim: str,
     *,
-    passage_sentences: int = 3,
+    passage_sentences: int = 2,
     passage_overlap: int = 1,
     bm25_top_k: int = 30,
     dense_top_k: int = 30,

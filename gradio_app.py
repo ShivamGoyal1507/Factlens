@@ -28,11 +28,50 @@ def _format_evidence(evidence: list[dict[str, Any]]) -> str:
     return "\n\n".join(sections)
 
 
-def verify_claim(claim: str) -> tuple[str, str, str, str, str]:
-    """Run FACTLENS and format its result for the Gradio outputs."""
+def _format_queries(result: dict[str, Any], use_query_generation: bool) -> str:
+    """Markdown for the "Generated search queries" card."""
+    queries = result.get("queries") or []
+    entities = result.get("entities") or []
+    normalized = result.get("normalized_claim") or ""
+
+    lines = []
+    if queries:
+        entity_keys = {e.lower() for e in entities}
+        for index, query in enumerate(queries, 1):
+            tag = " · *entity lookup*" if query.lower() in entity_keys else ""
+            lines.append(f"{index}. `{query}`{tag}")
+    else:
+        lines.append("No queries were generated.")
+    lines.append("")
+    if entities:
+        lines.append("**Entities** · " + ", ".join(f"`{e}`" for e in entities))
+    if normalized:
+        lines.append(f"\n**Claim checked as** · {normalized}")
+    return "\n".join(lines)
+
+
+def query_generation_label(enabled: bool) -> str:
+    """Checkbox label showing whether query generation is on or off."""
+    return (
+        "Query generation: ON (Qwen writes the search queries)"
+        if enabled
+        else "Query generation: OFF (search with the claim itself)"
+    )
+
+
+def verify_claim(
+    claim: str, use_query_generation: bool = True
+) -> tuple[str, str, str, str, str, str]:
+    """
+    Run FACTLENS and format its result for the Gradio outputs.
+
+    use_query_generation: True searches with queries written by the Qwen
+    query-generation model; False searches with the claim itself (faster).
+    """
     if not isinstance(claim, str) or not claim.strip():
         return (
             "## Ready when you are\nEnter a claim above to start verification.",
+            "",
             "",
             "",
             "",
@@ -40,10 +79,14 @@ def verify_claim(claim: str) -> tuple[str, str, str, str, str]:
         )
 
     try:
-        result = run_pipeline(claim.strip())
+        result = run_pipeline(
+            claim.strip(),
+            use_query_generation=bool(use_query_generation),
+        )
     except Exception as error:
         return (
             "## Verification unavailable",
+            "",
             "",
             "",
             "",
@@ -65,6 +108,7 @@ def verify_claim(claim: str) -> tuple[str, str, str, str, str]:
     return (
         verdict,
         result.get("explanation") or "Explanation was not generated.",
+        _format_queries(result, bool(use_query_generation)),
         _format_evidence(result["evidence"]),
         f"```json\n{counts}\n```",
         "Verification complete · Evidence ranked and analyzed.",
@@ -115,12 +159,27 @@ def create_demo() -> Any:
     .gradio-container .markdown {
         color: var(--factlens-ink) !important;
     }
+    /* Text fields only: a blanket `input { background: ... !important }`
+       also wipes the checkbox's checked colour and tick mark, so the
+       query-generation checkbox looked permanently unticked. */
     .gradio-container textarea,
-    .gradio-container input {
+    .gradio-container input:not([type="checkbox"]):not([type="radio"]) {
         color: var(--factlens-ink) !important;
         background: #ffffff !important;
         border-color: #b9cfca !important;
     }
+    .gradio-container input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        cursor: pointer;
+        accent-color: var(--factlens-blue);
+        border-color: #9bbdb4 !important;
+    }
+    .gradio-container input[type="checkbox"]:checked {
+        background-color: var(--factlens-blue) !important;
+        border-color: var(--factlens-blue) !important;
+    }
+    .gradio-container label:has(input[type="checkbox"]) { cursor: pointer; }
     .gradio-container textarea::placeholder,
     .gradio-container input::placeholder {
         color: #718783 !important;
@@ -282,6 +341,12 @@ def create_demo() -> Any:
                     max_lines=6,
                     autofocus=True,
                 )
+                use_query_generation = gr.Checkbox(
+                    value=True,
+                    label=query_generation_label(True),
+                    info="Tick to let the query generation model write search queries; "
+                    "untick to search with the claim itself (faster).",
+                )
                 with gr.Row():
                     verify = gr.Button("Verify claim", variant="primary", scale=3)
                     clear = gr.Button("Clear", variant="secondary", scale=1)
@@ -312,6 +377,12 @@ def create_demo() -> Any:
                         "The reasoning behind the verdict will appear here."
                     )
 
+            with gr.Column(elem_classes="result-card"):
+                gr.Markdown("### Generated search queries")
+                queries = gr.Markdown(
+                    "The search queries used for evidence retrieval will appear here."
+                )
+
             with gr.Column(elem_classes=["result-card", "evidence-card"]):
                 gr.Markdown("### Selected evidence")
                 evidence = gr.Markdown(
@@ -330,24 +401,31 @@ def create_demo() -> Any:
 
         verify.click(
             fn=verify_claim,
-            inputs=claim,
-            outputs=[verdict, explanation, evidence, counts, status],
+            inputs=[claim, use_query_generation],
+            outputs=[verdict, explanation, queries, evidence, counts, status],
         )
         claim.submit(
             fn=verify_claim,
-            inputs=claim,
-            outputs=[verdict, explanation, evidence, counts, status],
+            inputs=[claim, use_query_generation],
+            outputs=[verdict, explanation, queries, evidence, counts, status],
+        )
+        # Keep the label in sync with the tick: "Query generation: ON / OFF".
+        use_query_generation.change(
+            fn=lambda enabled: gr.Checkbox(label=query_generation_label(enabled)),
+            inputs=use_query_generation,
+            outputs=use_query_generation,
         )
         clear.click(
             fn=lambda: (
                 "",
                 "## Ready when you are\nEnter a claim above to start verification.",
                 "The reasoning behind the verdict will appear here.",
+                "The search queries used for evidence retrieval will appear here.",
                 "The highest-ranked sources supporting the analysis will appear here.",
                 "Retrieval and ranking counts will appear here after verification.",
                 "Ready to investigate a claim.",
             ),
-            outputs=[claim, verdict, explanation, evidence, counts, status],
+            outputs=[claim, verdict, explanation, queries, evidence, counts, status],
         )
 
     return demo
